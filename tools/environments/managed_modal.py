@@ -37,12 +37,27 @@ class _ManagedModalExecHandle:
     exec_id: str
 
 
+@dataclass(frozen=True)
+class _ExecStartResult:
+    """Discriminated return from _start_exec — either immediate or async."""
+    handle: _ManagedModalExecHandle | None = None
+    immediate: dict | None = None
+
+
 class ManagedModalEnvironment(BaseEnvironment):
     """Gateway-owned Modal sandbox with Hermes-compatible execute/cleanup.
 
     Inherits from BaseEnvironment for _wrap_command() (CWD tracking,
     snapshot sourcing) but keeps its own execute() since the HTTP gateway
     cannot return a ProcessHandle.
+
+    **Design note — no init_session():**
+    Unlike direct backends (local, docker, ssh, modal, daytona, singularity),
+    ManagedModal does not call init_session() because _run_bash() raises
+    NotImplementedError (the gateway is HTTP request/response only).
+    Commands run without login-shell snapshot sourcing — the gateway itself
+    manages sandbox environment setup.  _wrap_command() is still used for
+    CWD tracking via in-band stdout markers.
     """
 
     _CONNECT_TIMEOUT_SECONDS = _request_timeout_env("TERMINAL_MANAGED_MODAL_CONNECT_TIMEOUT_SECONDS", 1.0)
@@ -80,7 +95,15 @@ class ManagedModalEnvironment(BaseEnvironment):
     # _run_bash stub — ManagedModal cannot return a ProcessHandle
     # ------------------------------------------------------------------
 
-    def _run_bash(self, cmd_string: str, *, stdin_data: str | None = None):
+    def _run_bash(self, cmd_string: str, *, timeout: int | None = None,
+                  stdin_data: str | None = None):
+        """ManagedModal is HTTP-based and cannot return a ProcessHandle.
+
+        This stub satisfies the BaseEnvironment interface.  init_session()
+        is intentionally not called — the gateway manages the sandbox
+        environment directly.  execute() is overridden with HTTP
+        request/response logic.
+        """
         raise NotImplementedError(
             "ManagedModalEnvironment is HTTP-based and cannot return a "
             "ProcessHandle. Use execute() directly."
@@ -98,15 +121,13 @@ class ManagedModalEnvironment(BaseEnvironment):
         timeout: int | None = None,
         stdin_data: str | None = None,
     ) -> dict:
+        self._before_execute()
         effective_timeout = timeout or self.timeout
 
         # Handle stdin via heredoc embedding (gateway has payload support too)
         exec_stdin = stdin_data
         if stdin_data is not None:
-            marker = f"HERMES_EOF_{uuid.uuid4().hex[:8]}"
-            while marker in stdin_data:
-                marker = f"HERMES_EOF_{uuid.uuid4().hex[:8]}"
-            command = f"{command} << '{marker}'\n{stdin_data}\n{marker}"
+            command = self._embed_stdin_heredoc(command, stdin_data)
             exec_stdin = None  # embedded in command now
 
         exec_command, sudo_stdin = self._prepare_command(command)
@@ -115,20 +136,18 @@ class ManagedModalEnvironment(BaseEnvironment):
                 f"printf '%s\\n' {shlex.quote(sudo_stdin.rstrip())} | {exec_command}"
             )
 
-        # Use _wrap_command for consistent CWD tracking and snapshot sourcing
+        # Use _wrap_command for consistent CWD tracking and snapshot sourcing.
+        # The wrapped script handles cd internally, so no separate cwd needed.
         wrapped = self._wrap_command(exec_command, cwd)
-        effective_cwd = cwd or self.cwd
 
         # Start the exec via the gateway
-        start_result = self._start_exec(wrapped, effective_cwd, effective_timeout, exec_stdin)
+        start = self._start_exec(wrapped, effective_timeout, exec_stdin)
 
-        if start_result.get("_immediate"):
-            result = {k: v for k, v in start_result.items() if k != "_immediate"}
-            self._update_cwd_from_gateway_output(result)
-            return result
+        if start.immediate is not None:
+            self._update_cwd_from_gateway_output(start.immediate)
+            return start.immediate
 
-        handle = start_result.get("_handle")
-        if handle is None:
+        if start.handle is None:
             return self._error_result(
                 "Managed Modal exec start did not return an exec handle"
             )
@@ -141,7 +160,7 @@ class ManagedModalEnvironment(BaseEnvironment):
         while True:
             if is_interrupted():
                 try:
-                    self._cancel_exec(handle.exec_id)
+                    self._cancel_exec(start.handle.exec_id)
                 except Exception:
                     pass
                 return self._result(
@@ -149,7 +168,7 @@ class ManagedModalEnvironment(BaseEnvironment):
                 )
 
             try:
-                result = self._poll_exec(handle)
+                result = self._poll_exec(start.handle)
             except Exception as exc:
                 return self._error_result(f"Managed Modal exec poll failed: {exc}")
 
@@ -159,7 +178,7 @@ class ManagedModalEnvironment(BaseEnvironment):
 
             if deadline is not None and time.monotonic() >= deadline:
                 try:
-                    self._cancel_exec(handle.exec_id)
+                    self._cancel_exec(start.handle.exec_id)
                 except Exception:
                     pass
                 return self._result(
@@ -169,27 +188,19 @@ class ManagedModalEnvironment(BaseEnvironment):
             time.sleep(0.25)
 
     def _update_cwd_from_gateway_output(self, result: dict) -> None:
-        """Best-effort CWD update from the cwdfile written by _wrap_command.
-
-        Since we can't read files from the gateway sandbox directly, we
-        only update if there's a subsequent call that reads it.  The
-        _wrap_command template writes CWD to the cwdfile which will be
-        read on the next execute() call if we had file access.  For now,
-        CWD tracking in managed modal relies on the cwd parameter.
-        """
-        pass
+        """Extract CWD from in-band marker in command output."""
+        self._extract_cwd_from_output(result)
 
     # ------------------------------------------------------------------
     # Gateway transport
     # ------------------------------------------------------------------
 
-    def _start_exec(self, command: str, cwd: str, timeout: int,
-                    stdin_data: str | None) -> dict:
+    def _start_exec(self, command: str, timeout: int,
+                    stdin_data: str | None) -> _ExecStartResult:
         exec_id = str(uuid.uuid4())
         payload: Dict[str, Any] = {
             "execId": exec_id,
             "command": command,
-            "cwd": cwd,
             "timeoutMs": int(timeout * 1000),
         }
         if stdin_data is not None:
@@ -203,36 +214,24 @@ class ManagedModalEnvironment(BaseEnvironment):
                 timeout=10,
             )
         except Exception as exc:
-            return {
-                **self._error_result(f"Managed Modal exec failed: {exc}"),
-                "_immediate": True,
-            }
+            return _ExecStartResult(immediate=self._error_result(f"Managed Modal exec failed: {exc}"))
 
         if response.status_code >= 400:
-            return {
-                **self._error_result(
-                    self._format_error("Managed Modal exec failed", response)
-                ),
-                "_immediate": True,
-            }
+            return _ExecStartResult(immediate=self._error_result(
+                self._format_error("Managed Modal exec failed", response)
+            ))
 
         body = response.json()
         status = body.get("status")
         if status in {"completed", "failed", "cancelled", "timeout"}:
-            return {
-                **self._result(body.get("output", ""), body.get("returncode", 1)),
-                "_immediate": True,
-            }
+            return _ExecStartResult(immediate=self._result(body.get("output", ""), body.get("returncode", 1)))
 
         if body.get("execId") != exec_id:
-            return {
-                **self._error_result(
-                    "Managed Modal exec start did not return the expected exec id"
-                ),
-                "_immediate": True,
-            }
+            return _ExecStartResult(immediate=self._error_result(
+                "Managed Modal exec start did not return the expected exec id"
+            ))
 
-        return {"_handle": _ManagedModalExecHandle(exec_id=exec_id)}
+        return _ExecStartResult(handle=_ManagedModalExecHandle(exec_id=exec_id))
 
     def _poll_exec(self, handle: _ManagedModalExecHandle) -> dict | None:
         try:

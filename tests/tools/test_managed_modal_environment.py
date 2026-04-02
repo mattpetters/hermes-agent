@@ -76,7 +76,6 @@ def _install_fake_tools_package(*, credential_mounts=None):
             self.timeout = timeout
             self.env = env or {}
             self._snapshot_path = None
-            self._cwdfile_path = None
             self._snapshot_ready = False
             self._session_id = ""
 
@@ -87,7 +86,13 @@ def _install_fake_tools_package(*, credential_mounts=None):
             """Simplified wrapper for tests — just returns the command."""
             return command
 
-        def _update_cwd_from_file(self):
+        def init_session(self):
+            pass
+
+        def _extract_cwd_from_output(self, result: dict) -> dict:
+            return result
+
+        def _before_execute(self):
             pass
 
         def stop(self):
@@ -122,6 +127,35 @@ class _FakeResponse:
         if isinstance(self._payload, Exception):
             raise self._payload
         return self._payload
+
+
+def test_managed_modal_immediate_result_has_no_internal_keys(monkeypatch):
+    """Immediate results must not leak _immediate or _handle keys."""
+    _install_fake_tools_package()
+    managed_modal = _load_tool_module("tools.environments.managed_modal", "environments/managed_modal.py")
+
+    def fake_request(method, url, headers=None, json=None, timeout=None):
+        if method == "POST" and url.endswith("/v1/sandboxes"):
+            return _FakeResponse(200, {"id": "sandbox-1"})
+        if method == "POST" and url.endswith("/execs"):
+            return _FakeResponse(200, {
+                "execId": json["execId"],
+                "status": "completed",
+                "output": "done",
+                "returncode": 0,
+            })
+        if method == "POST" and url.endswith("/terminate"):
+            return _FakeResponse(200, {"status": "terminated"})
+        raise AssertionError(f"Unexpected: {method} {url}")
+
+    monkeypatch.setattr(managed_modal.requests, "request", fake_request)
+    env = managed_modal.ManagedModalEnvironment(image="python:3.11")
+    result = env.execute("echo done")
+    assert "_immediate" not in result
+    assert "_handle" not in result
+    assert result["output"] == "done"
+    assert result["returncode"] == 0
+    env.cleanup()
 
 
 def test_managed_modal_execute_polls_until_completed(monkeypatch):
