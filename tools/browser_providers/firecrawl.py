@@ -95,19 +95,13 @@ class FirecrawlProvider(CloudBrowserProvider):
             return False
 
     def emergency_cleanup(self, session_id: str) -> None:
-        api_key = os.environ.get("FIRECRAWL_API_KEY")
-        if not api_key:
-            logger.warning("Cannot emergency-cleanup Firecrawl session %s — missing credentials", session_id)
-            return
-        api_url = os.environ.get("FIRECRAWL_API_URL", _BASE_URL)
         try:
             requests.delete(
-                f"{api_url}/v2/browser/{session_id}",
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {api_key}",
-                },
+                f"{self._api_url()}/v2/browser/{session_id}",
+                headers=self._headers(),
                 timeout=5,
             )
+        except ValueError:
+            logger.warning("Cannot emergency-cleanup Firecrawl session %s — missing credentials", session_id)
         except Exception as e:
             logger.debug("Emergency cleanup failed for Firecrawl session %s: %s", session_id, e)
