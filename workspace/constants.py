@@ -195,6 +195,7 @@ _build/
 
 # Hermes internals
 .index/
+.hermesignore
 """
 
 

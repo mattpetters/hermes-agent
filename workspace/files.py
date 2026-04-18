@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 class DiscoveryResult:
     files: list[tuple[str, Path]]
     complete: bool
+    filtered_count: int = 0
 
 
 def discover_workspace_files(config: WorkspaceConfig) -> DiscoveryResult:
@@ -44,6 +45,7 @@ def discover_workspace_files(config: WorkspaceConfig) -> DiscoveryResult:
 
     files: list[tuple[str, Path]] = []
     complete = True
+    filtered_count = 0
 
     for root_spec in all_roots:
         root = Path(root_spec.path).expanduser().resolve()
@@ -65,6 +67,11 @@ def discover_workspace_files(config: WorkspaceConfig) -> DiscoveryResult:
         for p in paths:
             if not p.is_file():
                 continue
+            if p.name == HERMESIGNORE_NAME:
+                # The ignore-rules file is never itself an indexable artifact —
+                # hardcoded so a user editing their .hermesignore to remove the
+                # self-reference can't accidentally re-enable indexing of it.
+                continue
             if p.suffix.lower() in BINARY_SUFFIXES:
                 continue
             try:
@@ -74,14 +81,18 @@ def discover_workspace_files(config: WorkspaceConfig) -> DiscoveryResult:
                 continue
             if size > max_bytes:
                 log.debug("Skipping oversized file: %s", p)
+                filtered_count += 1
                 continue
             if size == 0:
+                filtered_count += 1
                 continue
             if ignore_spec is not None and _is_ignored(p, root, ignore_spec):
                 continue
             files.append((str(root), p))
 
-    return DiscoveryResult(files=files, complete=complete)
+    return DiscoveryResult(
+        files=files, complete=complete, filtered_count=filtered_count
+    )
 
 
 def seed_hermesignore(workspace_root: Path) -> None:

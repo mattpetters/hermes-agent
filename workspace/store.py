@@ -6,8 +6,10 @@ and BM25 full-text search.
 
 from __future__ import annotations
 
+import random
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +89,12 @@ class SQLiteFTS5Store:
     def open(self) -> None:
         index_dir = get_index_dir(self._db_path.parent.parent)
         index_dir.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(self._db_path))
+        # timeout=5.0 sets PRAGMA busy_timeout so regular writes wait on locks
+        # instead of raising "database is locked" when another process is
+        # mid-write. This covers every statement except `PRAGMA journal_mode
+        # = WAL`, which SQLite doesn't subject to busy_timeout — that
+        # specific pragma is retried in _init_schema.
+        self._conn = sqlite3.connect(str(self._db_path), timeout=5.0)
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
 
@@ -128,7 +135,7 @@ class SQLiteFTS5Store:
                 "DROP TRIGGER IF EXISTS chunks_ad;"
             )
 
-        cur.executescript(_SCHEMA_SQL)
+        _execute_with_lock_retry(cur, _SCHEMA_SQL)
 
         cur.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)",
@@ -291,6 +298,34 @@ class SQLiteFTS5Store:
 
     def commit(self) -> None:
         self.conn.commit()
+
+
+def _execute_with_lock_retry(
+    cur: sqlite3.Cursor,
+    sql: str,
+    *,
+    attempts: int = 25,
+    base_delay: float = 0.05,
+) -> None:
+    """Run a schema-bootstrap executescript() with retry on transient locks.
+
+    `PRAGMA journal_mode = WAL` (inside our schema bootstrap) requires an
+    exclusive file lock and is NOT subject to busy_timeout — so two processes
+    racing to initialize an empty DB can see one of them fail immediately with
+    "database is locked". Everything else in the schema honors busy_timeout,
+    but we retry the whole script uniformly to keep the code simple. The first
+    winner's bootstrap runs in microseconds; the loser retries a few times
+    until WAL mode is already set and its pragma becomes a no-op.
+    """
+    for attempt in range(attempts):
+        try:
+            cur.executescript(sql)
+            return
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc) or attempt == attempts - 1:
+                raise
+            # Jittered backoff: up to base_delay * (1 + random) per attempt.
+            time.sleep(base_delay * (1 + random.random()))
 
 
 _FTS5_COMPOUND_SEPARATORS = re.compile(r"[-_]")

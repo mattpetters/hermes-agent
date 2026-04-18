@@ -20,7 +20,9 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
+
+from chonkie import Pipeline
 
 from workspace.config import ChunkingConfig, WorkspaceConfig
 from workspace.constants import (
@@ -73,6 +75,7 @@ def index_workspace(
     errors: list[IndexingError] = []
 
     discovery = discover_workspace_files(config)
+    files_skipped += discovery.filtered_count
     all_files = discovery.files
     total = len(all_files)
     disk_paths: set[str] = set()
@@ -237,15 +240,13 @@ def ensure_workspace_dirs(config: WorkspaceConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _build_pipelines(ch: ChunkingConfig) -> dict[str, Any]:
+def _build_pipelines(ch: ChunkingConfig) -> dict[str, Pipeline]:
     """Build one Pipeline per file kind, sharing overlap-refinery config.
 
     Chonkie's Pipeline caches component instances internally keyed by init
     kwargs, so constructing a pipeline once per indexing run is enough to
     get full reuse across files of the same kind.
     """
-    from chonkie import Pipeline
-
     overlap_kwargs = dict(
         tokenizer="word",
         context_size=ch.overlap,
@@ -287,7 +288,7 @@ def _process_file(
     abs_path: str,
     text: str,
     suffix: str,
-    pipelines: dict[str, Any],
+    pipelines: dict[str, Pipeline],
 ) -> list[ChunkRecord]:
     if suffix in MARKDOWN_SUFFIXES:
         return _process_markdown(abs_path, text, pipelines)
@@ -300,7 +301,7 @@ def _process_file(
 def _process_markdown(
     abs_path: str,
     text: str,
-    pipelines: dict[str, Any],
+    pipelines: dict[str, Pipeline],
 ) -> list[ChunkRecord]:
     doc = pipelines["markdown"].run(texts=text)
 
@@ -400,15 +401,13 @@ def _process_markdown(
 def _process_code(
     abs_path: str,
     text: str,
-    pipelines: dict[str, Any],
+    pipelines: dict[str, Pipeline],
 ) -> list[ChunkRecord]:
     doc = pipelines["code"].run(texts=text)
     line_offsets = _build_line_offsets(text)
     records: list[ChunkRecord] = []
     for i, chunk in enumerate(doc.chunks):
         sc, ec = chunk.start_index, chunk.end_index
-        lang = getattr(chunk, "language", None)
-        metadata = json.dumps({"language": lang}) if lang else None
         records.append(
             ChunkRecord(
                 chunk_id=_make_id(),
@@ -422,7 +421,7 @@ def _process_code(
                 end_char=ec,
                 section=None,
                 kind="code",
-                chunk_metadata=metadata,
+                chunk_metadata=None,
                 context=chunk.context,
             )
         )
@@ -432,7 +431,7 @@ def _process_code(
 def _process_plain(
     abs_path: str,
     text: str,
-    pipelines: dict[str, Any],
+    pipelines: dict[str, Pipeline],
 ) -> list[ChunkRecord]:
     doc = pipelines["plain"].run(texts=text)
     line_offsets = _build_line_offsets(text)

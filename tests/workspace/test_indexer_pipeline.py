@@ -14,11 +14,15 @@ after migrating from manual Chonkie wiring to `chonkie.Pipeline`:
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 from workspace.config import WorkspaceConfig
 from workspace.constants import DEFAULT_IGNORE_PATTERNS
 from workspace.indexer import index_workspace
+from workspace.search import search_workspace
 from workspace.store import SQLiteFTS5Store
 
 
@@ -123,7 +127,7 @@ def test_small_markdown_file_is_split_into_modalities(tmp_path: Path):
 
     with SQLiteFTS5Store(cfg.workspace_root) as store:
         rows = store.conn.execute(
-            "SELECT kind FROM chunks WHERE abs_path = ? ORDER BY chunk_index",
+            "SELECT kind, content FROM chunks WHERE abs_path = ? ORDER BY chunk_index",
             (str(md.resolve()),),
         ).fetchall()
 
@@ -131,6 +135,12 @@ def test_small_markdown_file_is_split_into_modalities(tmp_path: Path):
     assert "markdown_text" in kinds
     assert "markdown_code" in kinds
     assert len(rows) >= 2, f"small markdown must still be multimodal, got {kinds}"
+
+    # Guard against the code fence being accidentally swallowed into the prose
+    # row — `kinds` containing both labels could still false-pass if the
+    # "markdown_text" row itself contained the code block body.
+    text_row = next(r for r in rows if r["kind"] == "markdown_text")
+    assert "print('hi')" not in text_row["content"]
 
 
 def test_overlap_context_propagates_and_is_prefix_of_next_chunk(tmp_path: Path):
@@ -222,3 +232,176 @@ def test_config_signature_change_invalidates_existing_index(tmp_path: Path):
     third = index_workspace(cfg2)
     assert third.files_indexed == 1
     assert third.files_skipped == 0
+
+
+def test_concurrent_index_does_not_crash(tmp_path: Path):
+    """Two simultaneous index_workspace() calls against the same workspace must
+    both succeed, and the SQLite DB must pass PRAGMA integrity_check.
+
+    Pre-fix, the second process' sqlite3.connect() had no busy-timeout, so it
+    would fail with `OperationalError: database is locked` the instant the
+    first process held a lock for schema init. The `sqlite3.connect(..., timeout=5.0)`
+    change makes the second process wait for the lock instead of crashing.
+
+    Gap Worker 3's original variant of this test passed before the Pipeline
+    migration because the old `_ChunkerCache` imported chonkie lazily, which
+    added enough startup skew that the race never landed. Eager
+    `_build_pipelines()` removed that skew; this test is the regression guard.
+    """
+    cfg = _make_config(tmp_path)
+    # Seed a few small markdown files so both runs have something to do.
+    for i in range(5):
+        _write(
+            cfg.workspace_root / "docs" / f"note_{i}.md",
+            f"# Note {i}\n\nSome content for note {i}.\n",
+        )
+
+    hermes_home = tmp_path / "cfg_home"
+    workspace_root = cfg.workspace_root
+
+    # The project root is 3 levels up from this test file. The spawned
+    # subprocess won't have pytest's conftest setup, so we prepend the project
+    # root to sys.path inside the helper script to make `workspace` importable.
+    project_root = Path(__file__).resolve().parents[2]
+
+    # Write a small helper script that loads a config pointing at the same
+    # workspace_root and runs index_workspace. Using subprocess for clean
+    # process-isolation (fresh interpreter per worker).
+    script = tmp_path / "_run_index.py"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            import sys
+            from pathlib import Path
+
+            sys.path.insert(0, {str(project_root)!r})
+
+            from workspace.config import WorkspaceConfig
+            from workspace.indexer import index_workspace
+
+            hermes_home = Path({str(hermes_home)!r})
+            cfg = WorkspaceConfig.from_dict({{}}, hermes_home)
+            summary = index_workspace(cfg)
+            sys.exit(0)
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    p1 = subprocess.Popen([sys.executable, str(script)])
+    p2 = subprocess.Popen([sys.executable, str(script)])
+    rc1 = p1.wait(timeout=120)
+    rc2 = p2.wait(timeout=120)
+
+    assert rc1 == 0, f"first concurrent indexer exited {rc1}"
+    assert rc2 == 0, f"second concurrent indexer exited {rc2}"
+
+    # Both processes survived — now verify the DB is not corrupted.
+    with SQLiteFTS5Store(workspace_root) as store:
+        result = store.conn.execute("PRAGMA integrity_check").fetchone()
+    assert result[0] == "ok", f"PRAGMA integrity_check returned: {result[0]!r}"
+
+
+def test_search_path_prefix_resolves_symlinks(tmp_path: Path):
+    """search_workspace must resolve `path_prefix` before handing it to the
+    store. The indexer stores resolved absolute paths (`file_path.resolve()`);
+    the store does a literal byte-prefix match. Callers using the Python API
+    with a symlinked path got silent empty results pre-fix. The CLI handled
+    this in `commands.py:174` — this test guards that the Python API entry
+    now mirrors that behavior.
+    """
+    real_docs = tmp_path / "real-docs"
+    real_docs.mkdir()
+    _write(real_docs / "alpha.md", "# Alpha\n\nThe alpha document describes things.\n")
+    _write(real_docs / "beta.md", "# Beta\n\nThe beta document explains more things.\n")
+
+    # Symlink `tmp_path/linked` -> `real-docs`. (Making "workspace/linked" a
+    # sub-path would require first creating a workspace dir — plain `linked`
+    # under tmp_path is enough to exercise the resolver.)
+    linked = tmp_path / "linked"
+    linked.symlink_to(real_docs, target_is_directory=True)
+
+    cfg = _make_config(
+        tmp_path,
+        {"knowledgebase": {"roots": [{"path": str(linked), "recursive": True}]}},
+    )
+
+    summary = index_workspace(cfg)
+    assert summary.files_indexed == 2
+
+    # Via the symlink path — must still return hits, because search_workspace
+    # resolves path_prefix before the byte-prefix compare.
+    via_symlink = search_workspace(
+        "document",
+        cfg,
+        path_prefix=str(linked),
+    )
+    assert len(via_symlink) > 0, "search_workspace must resolve symlinked path_prefix"
+
+    # Via the resolved real path — the counts must match.
+    via_resolved = search_workspace(
+        "document",
+        cfg,
+        path_prefix=str(real_docs.resolve()),
+    )
+    assert len(via_symlink) == len(via_resolved)
+
+
+def test_hermesignore_never_indexed(tmp_path: Path):
+    """.hermesignore files are discovery-level infrastructure, not indexable
+    content. _make_config seeds one at the workspace root; writing another one
+    in a subdirectory must also be excluded. Post-fix the filter is hardcoded
+    in `discover_workspace_files`, so this holds regardless of user-edited
+    ignore patterns.
+    """
+    cfg = _make_config(tmp_path)
+    # Additional .hermesignore in a nested directory.
+    _write(
+        cfg.workspace_root / "docs" / ".hermesignore",
+        "# nested ignore rules\n*.bak\n",
+    )
+    # Plus a legitimate markdown file so the index has something in it.
+    _write(cfg.workspace_root / "docs" / "ok.md", "# Ok\n\nSome prose.\n")
+
+    summary = index_workspace(cfg)
+    assert summary.files_errored == 0
+
+    with SQLiteFTS5Store(cfg.workspace_root) as store:
+        rows = store.conn.execute(
+            "SELECT abs_path FROM chunks WHERE abs_path LIKE ?",
+            ("%.hermesignore",),
+        ).fetchall()
+
+    assert rows == [], f"expected no .hermesignore rows, got: {[r['abs_path'] for r in rows]}"
+
+
+def test_summary_reports_filtered_empty_and_oversized(tmp_path: Path):
+    """Files dropped at discovery (zero-size or over `max_file_mb`) must count
+    toward `files_skipped` in the IndexSummary — otherwise dropped files just
+    vanish from the report and the user has no signal that their config is
+    filtering things out.
+    """
+    cfg = _make_config(
+        tmp_path,
+        {"knowledgebase": {"indexing": {"max_file_mb": 1}}},
+    )
+
+    # Two zero-byte files.
+    (cfg.workspace_root / "docs" / "empty1.md").parent.mkdir(
+        parents=True, exist_ok=True
+    )
+    (cfg.workspace_root / "docs" / "empty1.md").write_bytes(b"")
+    (cfg.workspace_root / "docs" / "empty2.txt").write_bytes(b"")
+
+    # One oversized file (2 MiB > max_file_mb=1).
+    oversized = cfg.workspace_root / "docs" / "huge.md"
+    oversized.write_bytes(b"a" * (2 * 1024 * 1024))
+
+    # One real file that should be indexed.
+    _write(cfg.workspace_root / "docs" / "real.md", "# Real\n\nActual content.\n")
+
+    summary = index_workspace(cfg)
+
+    assert summary.files_indexed == 1
+    assert summary.files_skipped == 3
+    assert summary.files_errored == 0
