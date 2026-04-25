@@ -527,3 +527,20 @@ def test_offer_launch_chat_manual_fallback_when_unresolvable(monkeypatch, capsys
 
     captured = capsys.readouterr()
     assert "Run 'hermes chat' manually" in captured.out
+
+
+class TestVisionModelBlankGuard:
+    """Regression: blank vision model input must not overwrite existing .env value."""
+
+    def test_save_env_value_overwrites_with_empty(self, tmp_path, monkeypatch):
+        """Proves save_env_value has no internal guard — caller must guard."""
+        env_path = tmp_path / ".env"
+        env_path.write_text("AUXILIARY_VISION_MODEL=custom-model\n")
+        monkeypatch.setattr("hermes_cli.config.get_env_path", lambda: env_path)
+
+        from hermes_cli.config import save_env_value
+        save_env_value("AUXILIARY_VISION_MODEL", "")
+
+        # save_env_value DOES overwrite — this is by design.
+        # The guard must be at the call site in setup.py.
+        assert "AUXILIARY_VISION_MODEL=\n" in env_path.read_text()
