@@ -123,6 +123,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("normal", "fast", "status", "on", "off")),
     CommandDef("skin", "Show or change the display skin/theme", "Configuration",
                cli_only=True, args_hint="[name]"),
+    CommandDef("reload-theme", "Reload the active skin/theme YAML from disk (no session restart)",
+               "Configuration", cli_only=True, args_hint="[--banner]",
+               aliases=("reload_theme", "reload-skin", "reload_skin")),
     CommandDef("voice", "Toggle voice mode", "Configuration",
                args_hint="[on|off|tts|status]", subcommands=("on", "off", "tts", "status")),
     CommandDef("busy", "Control what Enter does while Hermes is working", "Configuration",
@@ -955,6 +958,9 @@ class SlashCommandCompleter(Completer):
         self._file_cache: list[str] = []
         self._file_cache_time: float = 0.0
         self._file_cache_cwd: str = ""
+        # Cached session list for /resume fuzzy completion
+        self._session_cache: list[dict[str, Any]] = []
+        self._session_cache_time: float = 0.0
 
     def _command_allowed(self, slash_command: str) -> bool:
         if self._command_filter is None:
@@ -1332,6 +1338,107 @@ class SlashCommandCompleter(Completer):
         except Exception:
             pass
 
+    def _get_recent_sessions(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Return cached recent sessions (refreshed every 5s)."""
+        now = time.monotonic()
+        if self._session_cache and (now - self._session_cache_time) < 5.0:
+            return self._session_cache
+        sessions: list[dict[str, Any]] = []
+        try:
+            from hermes_state import SessionDB
+            db = SessionDB()
+            try:
+                sessions = db.list_sessions_rich(limit=limit) or []
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        except Exception:
+            sessions = []
+        self._session_cache = sessions
+        self._session_cache_time = now
+        return sessions
+
+    @staticmethod
+    def _score_session(title: str, sid: str, query: str) -> int:
+        """Fuzzy score a session title/id against a query. Higher = better."""
+        if not query:
+            return 1
+        q = query.lower()
+        t = (title or "").lower()
+        i = (sid or "").lower()
+        if t == q:
+            return 100
+        if t.startswith(q):
+            return 80
+        if q in t:
+            return 60
+        if i.startswith(q):
+            return 55
+        if q in i:
+            return 40
+        # Subsequence match on title (e.g. "tcr" -> "theme color reload")
+        qi = 0
+        for c in t:
+            if qi < len(q) and c == q[qi]:
+                qi += 1
+        if qi == len(q):
+            return 25
+        return 0
+
+    def _resume_completions(self, sub_text: str, sub_lower: str):
+        """Yield completions for /resume from recent session titles + ids."""
+        sessions = self._get_recent_sessions()
+        if not sessions:
+            return
+
+        query = sub_text.strip()
+        scored: list[tuple[int, dict[str, Any]]] = []
+        for s in sessions:
+            title = s.get("title") or ""
+            sid = s.get("id") or ""
+            # Skip sessions with no title and no id (shouldn't happen)
+            if not title and not sid:
+                continue
+            score = self._score_session(title, sid, query)
+            if score > 0:
+                scored.append((score, s))
+
+        # Stable order: score desc, then last_active desc (already roughly the
+        # input order from list_sessions_rich, which sorts by last activity).
+        scored.sort(key=lambda x: -x[0])
+
+        for _, s in scored[:25]:
+            title = s.get("title") or ""
+            sid = s.get("id") or ""
+            # Prefer title as the completion value (it's what users want to
+            # type); fall back to id when there's no title.
+            value = title if title else sid
+            # Quote titles containing spaces so the resulting command parses
+            # as a single argument. /resume currently splits with `split(None, 1)`
+            # so anything after the first space is captured anyway, but quoting
+            # keeps copy/paste behaviour sane.
+            if " " in value:
+                value = f'"{value}"'
+            preview = (s.get("preview") or "").strip()
+            msgs = s.get("message_count") or 0
+            meta_bits = []
+            if msgs:
+                meta_bits.append(f"{msgs} msg{'s' if msgs != 1 else ''}")
+            if preview:
+                meta_bits.append(preview[:40])
+            elif sid and title:
+                meta_bits.append(sid)
+            meta = " · ".join(meta_bits)
+            display = title or sid
+            yield Completion(
+                value,
+                start_position=-len(sub_text),
+                display=display,
+                display_meta=meta,
+            )
+
     def _model_completions(self, sub_text: str, sub_lower: str):
         """Yield completions for /model from config aliases + built-in aliases."""
         seen = set()
@@ -1385,6 +1492,12 @@ class SlashCommandCompleter(Completer):
         if len(parts) > 1 or (len(parts) == 1 and text.endswith(" ")):
             sub_text = parts[1] if len(parts) > 1 else ""
             sub_lower = sub_text.lower()
+
+            # /resume: fuzzy match session titles. Allow spaces in sub_text
+            # because session titles often contain them.
+            if base_cmd == "/resume":
+                yield from self._resume_completions(sub_text, sub_lower)
+                return
 
             # Dynamic completions for commands with runtime lists
             if " " not in sub_text:
