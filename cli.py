@@ -3595,6 +3595,18 @@ class HermesCLI:
                 session_id=self.session_id,
                 context_length=ctx_len,
             )
+
+            # Recent sessions panel — full-width, below the banner.
+            try:
+                from hermes_cli.banner import build_recent_sessions_panel
+                build_recent_sessions_panel(
+                    console=self.console,
+                    exclude_session_id=self.session_id,
+                    limit=10,
+                )
+            except Exception:
+                pass  # Never break startup over the recent-sessions panel
+
         
         # Show tool availability warnings if any tools are disabled
         self._show_tool_availability_warnings()
@@ -6341,6 +6353,8 @@ class HermesCLI:
             self._handle_skin_command(cmd_original)
         elif canonical == "reload-theme":
             self._handle_reload_theme_command(cmd_original)
+        elif canonical == "sync-fork":
+            self._handle_sync_fork_command(cmd_original)
         elif canonical == "voice":
             self._handle_voice_command(cmd_original)
         elif canonical == "busy":
@@ -6960,6 +6974,136 @@ class HermesCLI:
                 print(f"  Banner re-render failed: {e}")
         else:
             print("  (Tip: /reload-theme --banner to also re-render the banner.)")
+
+    def _handle_sync_fork_command(self, cmd: str = ""):
+        """Rebase ~/.hermes/hermes-agent on upstream/main and force-push origin.
+
+        Flags:
+            --check   Only print fork status; don't fetch, rebase, or push.
+
+        Refuses to run if the working tree is dirty or HEAD isn't on 'main'.
+        On success, invalidates the banner's fork-state cache so the next
+        banner render reflects the new state.
+        """
+        import subprocess
+        from pathlib import Path
+
+        try:
+            from hermes_cli.banner import (
+                _resolve_repo_dir,
+                get_fork_state,
+            )
+            import hermes_cli.banner as _banner_mod
+        except Exception as e:
+            print(f"  sync-fork unavailable: {e}")
+            return
+
+        repo_dir = _resolve_repo_dir()
+        if repo_dir is None:
+            print("  Not a git checkout — nothing to sync.")
+            return
+
+        flags = (cmd or "").strip().split()[1:]
+        check_only = any(f in ("--check", "-n", "--dry-run") for f in flags)
+
+        def _run(args, timeout=30):
+            return subprocess.run(
+                args, capture_output=True, text=True,
+                timeout=timeout, cwd=str(repo_dir),
+            )
+
+        # Show current fork state up front
+        state = get_fork_state()
+        if not state:
+            print("  No upstream remote configured — not a fork.")
+            return
+
+        owner = state.get("owner_repo") or "?"
+        upstream = state.get("upstream_owner_repo") or "?"
+        behind = int(state.get("behind") or 0)
+        ahead = int(state.get("ahead") or 0)
+        print(f"  Fork: {owner}")
+        print(f"  Upstream: {upstream}")
+        print(f"  Status: {behind} behind, {ahead} ahead (vs cached upstream/main)")
+
+        if check_only:
+            print("  --check: skipping fetch/rebase/push.")
+            return
+
+        # Pre-flight: clean tree
+        st = _run(["git", "status", "--porcelain"], timeout=10)
+        if st.returncode != 0:
+            print(f"  git status failed: {(st.stderr or '').strip()}")
+            return
+        if (st.stdout or "").strip():
+            print("  Working tree is dirty. Commit or stash before /sync-fork:")
+            for line in (st.stdout or "").splitlines()[:10]:
+                print(f"    {line}")
+            return
+
+        # Pre-flight: on main
+        br = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
+        branch = (br.stdout or "").strip()
+        if br.returncode != 0 or not branch:
+            print("  Failed to read current branch.")
+            return
+        if branch != "main":
+            print(f"  HEAD is on '{branch}', not 'main'. /sync-fork only runs on main.")
+            return
+
+        # Fetch upstream
+        print("  Fetching upstream/main...")
+        fe = _run(["git", "fetch", "upstream", "main"], timeout=60)
+        if fe.returncode != 0:
+            print(f"  git fetch failed: {(fe.stderr or '').strip()}")
+            return
+
+        # Re-check counts after fetch
+        rl = _run(
+            ["git", "rev-list", "--left-right", "--count", "HEAD...upstream/main"],
+            timeout=10,
+        )
+        if rl.returncode == 0:
+            parts = (rl.stdout or "").split()
+            if len(parts) == 2:
+                ahead = int(parts[0] or "0")
+                behind = int(parts[1] or "0")
+        if behind == 0:
+            print("  Already up to date with upstream/main.")
+            # Still invalidate cache so banner reflects fresh fetch
+            _banner_mod._fork_state_cache = None
+            return
+
+        print(f"  Rebasing {ahead} local commit(s) onto upstream/main ({behind} behind)...")
+        rb = _run(["git", "rebase", "upstream/main"], timeout=120)
+        if rb.returncode != 0:
+            print("  Rebase hit conflicts. Resolve manually, then:")
+            print("    cd ~/.hermes/hermes-agent")
+            print("    git rebase --continue   # or: git rebase --abort")
+            print(f"    git push --force-with-lease origin main")
+            print()
+            print((rb.stdout or "").rstrip())
+            print((rb.stderr or "").rstrip())
+            return
+
+        print("  Force-pushing to origin/main (--force-with-lease)...")
+        ps = _run(
+            ["git", "push", "--force-with-lease", "origin", "main"],
+            timeout=60,
+        )
+        if ps.returncode != 0:
+            print(f"  Push failed: {(ps.stderr or '').strip()}")
+            print("  Rebase succeeded locally; resolve and re-push manually.")
+            return
+
+        # Invalidate fork-state cache so banner reflects new state next render
+        try:
+            _banner_mod._fork_state_cache = None
+        except Exception:
+            pass
+
+        print(f"  Done. Synced {behind} commit(s) from upstream; {ahead} local commit(s) replayed on top.")
+        print("  Tip: restart Hermes (or run /reload-theme --banner) to refresh the indicator.")
 
     def _toggle_verbose(self):
         """Cycle tool progress mode: off → new → all → verbose → off."""
