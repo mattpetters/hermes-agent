@@ -278,6 +278,8 @@ function SessionRow({
 
   useEffect(() => {
     if (isExpanded && messages === null && !loading) {
+      // Lazy-load messages when row is expanded; loading-state lifecycle.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setLoading(true);
       api
         .getSessionMessages(session.id)
@@ -492,6 +494,8 @@ export default function SessionsPage() {
   }, []);
 
   useEffect(() => {
+    // Reload sessions list when page changes; loadSessions() uses setState internally.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadSessions(page);
   }, [loadSessions, page]);
 
@@ -518,8 +522,11 @@ export default function SessionsPage() {
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
     if (!search.trim()) {
+      // Empty search → clear results state.
+      /* eslint-disable react-hooks/set-state-in-effect */
       setSearchResults(null);
       setSearching(false);
+      /* eslint-enable react-hooks/set-state-in-effect */
       return;
     }
 

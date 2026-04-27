@@ -28,7 +28,7 @@ export function TabsList({ className, ...props }: React.HTMLAttributes<HTMLDivEl
 
 export function TabsTrigger({
   active,
-  value,
+  value: _value,
   onClick,
   className,
   ...props

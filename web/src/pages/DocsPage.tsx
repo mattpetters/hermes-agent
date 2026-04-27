@@ -2,7 +2,7 @@ import { useLayoutEffect } from "react";
 import { ExternalLink } from "lucide-react";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
-import { buttonVariants } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button-variants";
 import { cn } from "@/lib/utils";
 import { PluginSlot } from "@/plugins";
 
