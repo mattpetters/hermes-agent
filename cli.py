@@ -335,9 +335,7 @@ def load_cli_config() -> Dict[str, Any]:
             "resume_display": "full",
             "show_reasoning": False,
             "streaming": True,
-            "busy_input_mode": "interrupt",
-            "persistent_output": True,
-            "persistent_output_max_lines": 200,
+            "busy_input_mode": "steer",
 
             "skin": "default",
         },
@@ -2176,7 +2174,7 @@ class HermesCLI:
         # busy_input_mode: "interrupt" (Enter interrupts current run),
         # "queue" (Enter queues for next turn), or "steer" (Enter injects
         # mid-run via /steer, arriving after the next tool call).
-        _bim = str(CLI_CONFIG["display"].get("busy_input_mode", "interrupt")).strip().lower()
+        _bim = str(CLI_CONFIG["display"].get("busy_input_mode", "steer")).strip().lower()
         if _bim == "queue":
             self.busy_input_mode = "queue"
         elif _bim == "steer":

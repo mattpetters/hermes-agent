@@ -78,6 +78,12 @@ _SESSION_HEADER_NAME = "X-Hermes-Session-Token"
 # In-browser Chat tab (/chat, /api/pty, …).  Off unless ``hermes dashboard --tui``
 # or HERMES_DASHBOARD_TUI=1.  Set from :func:`start_server`.
 _DASHBOARD_EMBEDDED_CHAT_ENABLED = False
+# When the dashboard is bound to a non-loopback interface with --insecure,
+# the operator has explicitly opted into LAN access for the embedded chat
+# WebSockets. Without this flag, the WS handlers below restrict to
+# loopback even when the HTTP API is reachable on the LAN, which leaves
+# remote clients with a chat UI that can't open its event/PTY streams.
+_DASHBOARD_ALLOW_PUBLIC_CHAT = False
 
 # Simple rate limiter for the reveal endpoint
 _reveal_timestamps: List[float] = []
@@ -4430,6 +4436,14 @@ def start_server(
 
     global _DASHBOARD_EMBEDDED_CHAT_ENABLED
     _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
+
+    # Mirror the operator's explicit opt-in for non-loopback HTTP onto the
+    # embedded-chat WebSocket guards. Without this, --insecure dashboards
+    # exposed on the LAN render the chat UI but every WS handshake closes
+    # with code 4403 (loopback-only), which surfaces as "events feed
+    # disconnected" / "[session ended]" on remote clients.
+    global _DASHBOARD_ALLOW_PUBLIC_CHAT
+    _DASHBOARD_ALLOW_PUBLIC_CHAT = bool(allow_public)
 
     if host not in _LOCALHOST_HOSTS and not allow_public:
         raise SystemExit(
