@@ -1268,6 +1268,14 @@ def cmd_chat(args):
     except Exception:
         pass
 
+    # Background-fetch upstream/main so the fork indicator stays current
+    try:
+        from hermes_cli.banner import prefetch_upstream_fetch
+
+        prefetch_upstream_fetch()
+    except Exception:
+        pass
+
     # Sync bundled skills on every CLI launch (fast -- skips unchanged skills)
     try:
         from tools.skills_sync import sync_skills

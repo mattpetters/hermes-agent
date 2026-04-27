@@ -165,6 +165,10 @@ COMMAND_REGISTRY: list[CommandDef] = [
                subcommands=("connect", "disconnect", "status")),
     CommandDef("plugins", "List installed plugins and their status",
                "Tools & Skills", cli_only=True),
+    CommandDef("sync-fork", "Rebase ~/.hermes/hermes-agent on upstream/main and force-push origin",
+               "Tools & Skills", cli_only=True,
+               aliases=("sync_fork", "fork-sync", "fork_sync"),
+               args_hint="[--check]"),
 
     # Info
     CommandDef("commands", "Browse all commands and skills (paginated)", "Info",
