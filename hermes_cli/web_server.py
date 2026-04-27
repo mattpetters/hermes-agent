@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import secrets
+import signal
 import subprocess
 import sys
 import threading
@@ -3544,48 +3545,125 @@ def _render_qr_ascii(url: str) -> Optional[str]:
         return None
 
 
+def _dashboard_pidfile() -> Path:
+    """Path to the dashboard pidfile (one per HERMES_HOME)."""
+    try:
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / "dashboard.pid"
+    except Exception:
+        return Path.home() / ".hermes" / "dashboard.pid"
+
+
+def _read_pidfile() -> tuple[int | None, int | None]:
+    """Return (pid, port) from pidfile if alive, else (None, None)."""
+    pf = _dashboard_pidfile()
+    if not pf.exists():
+        return None, None
+    try:
+        raw = pf.read_text().strip()
+        parts = raw.split(":")
+        pid = int(parts[0])
+        port = int(parts[1]) if len(parts) > 1 else None
+    except Exception:
+        return None, None
+    # PID liveness check
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        # Stale pidfile — clean up
+        try:
+            pf.unlink()
+        except Exception:
+            pass
+        return None, None
+    return pid, port
+
+
+def _write_pidfile(port: int) -> None:
+    pf = _dashboard_pidfile()
+    try:
+        pf.parent.mkdir(parents=True, exist_ok=True)
+        pf.write_text(f"{os.getpid()}:{port}\n")
+    except Exception:
+        pass
+
+
+def _remove_pidfile() -> None:
+    try:
+        _dashboard_pidfile().unlink()
+    except Exception:
+        pass
+
+
+def stop_running_dashboard() -> bool:
+    """Kill a running dashboard if one exists. Returns True if one was killed."""
+    pid, _port = _read_pidfile()
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        _remove_pidfile()
+        return False
+    # Wait briefly for clean shutdown, then SIGKILL if needed
+    for _ in range(20):  # 2 seconds
+        try:
+            os.kill(pid, 0)
+        except (OSError, ProcessLookupError):
+            _remove_pidfile()
+            return True
+        time.sleep(0.1)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
+    _remove_pidfile()
+    return True
+
+
 def _print_access_info(host: str, port: int) -> None:
     """Print URL(s) the user can hit, plus a QR for phone access when binding
-    to a LAN-reachable interface. Always prints something — never raises."""
+    to a LAN-reachable interface. Always prints something — never raises.
+    Flushes immediately so the banner shows even when stdout is captured."""
 
     bind_all = host in ("0.0.0.0", "::", "")
     is_local = host in _LOCALHOST_HOSTS
 
-    print()
-    print("  ┌─ Hermes Web UI ──────────────────────────────────────────")
+    lines: list[str] = []
+    lines.append("")
+    lines.append("  ┌─ Hermes Web UI ──────────────────────────────────────────")
     if is_local:
-        print(f"  │  Local      → http://{host}:{port}")
-        print(f"  │")
-        print(f"  │  For phone / LAN access:")
-        print(f"  │    hermes dashboard --host 0.0.0.0 --insecure")
+        lines.append(f"  │  Local      → http://{host}:{port}")
+        lines.append(f"  │")
+        lines.append(f"  │  For phone / LAN access:")
+        lines.append(f"  │    hermes dashboard  (default — phone-connect mode)")
     else:
-        # Concrete bind (e.g. 192.168.x.x) or 0.0.0.0 — print whatever we know.
         if not bind_all:
-            print(f"  │  Bound       → http://{host}:{port}")
-        print(f"  │  Local       → http://127.0.0.1:{port}")
+            lines.append(f"  │  Bound       → http://{host}:{port}")
+        lines.append(f"  │  Local       → http://127.0.0.1:{port}")
         lan_ips = _get_lan_ips()
-        # If user bound to a specific IP, prefer that for the QR; else first LAN IP.
         primary_lan = host if (not bind_all and not is_local) else (lan_ips[0] if lan_ips else None)
         for ip in lan_ips:
             if ip == host:
                 continue
-            print(f"  │  LAN         → http://{ip}:{port}")
+            lines.append(f"  │  LAN         → http://{ip}:{port}")
         if primary_lan:
             qr_url = f"http://{primary_lan}:{port}"
             qr = _render_qr_ascii(qr_url)
             if qr:
-                print(f"  │")
-                print(f"  │  Scan from a phone on the same Wi-Fi:")
-                print(f"  │    {qr_url}")
-                # Indent each QR line to align inside the box.
+                lines.append(f"  │")
+                lines.append(f"  │  Scan from a phone on the same Wi-Fi:")
+                lines.append(f"  │    {qr_url}")
                 for line in qr.splitlines():
-                    print(f"  │    {line}")
+                    lines.append(f"  │    {line}")
             else:
-                print(f"  │")
-                print(f"  │  Phone QR unavailable — install with:")
-                print(f"  │    pip install qrcode")
-    print("  └──────────────────────────────────────────────────────────")
-    print()
+                lines.append(f"  │")
+                lines.append(f"  │  Phone QR unavailable — install with:")
+                lines.append(f"  │    pip install qrcode")
+    lines.append("  └──────────────────────────────────────────────────────────")
+    lines.append("")
+    sys.stdout.write("\n".join(lines) + "\n")
+    sys.stdout.flush()
 
 
 def start_server(
@@ -3596,8 +3674,34 @@ def start_server(
     *,
     embedded_chat: bool = False,
 ):
-    """Start the web UI server."""
+    """Start the web UI server.
+
+    If a dashboard is already running (pidfile present, PID alive), reprint
+    the access info (QR + URLs) and exit 0 instead of failing on port bind.
+    This makes ``hermes dashboard`` idempotent — running it again from any
+    terminal just shows you the QR again.
+    """
     import uvicorn
+
+    # If a previous instance is still alive, just reprint the banner.
+    existing_pid, existing_port = _read_pidfile()
+    if existing_pid is not None and existing_port:
+        print(f"  Dashboard already running (pid {existing_pid}, port {existing_port}).")
+        print(f"  Reprinting access info — use 'hermes dashboard --stop' to terminate.")
+        sys.stdout.flush()
+        # Best-effort: figure out the bind host from the live socket so the
+        # QR shows the right URL. If we can't, assume 0.0.0.0 (the new default).
+        bind_host = "0.0.0.0"
+        try:
+            import socket as _socket
+            with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+                s.settimeout(0.2)
+                s.connect(("127.0.0.1", existing_port))
+                bind_host = "0.0.0.0"  # if loopback connects, treat as bind-all
+        except Exception:
+            pass
+        _print_access_info(bind_host, existing_port)
+        return
 
     global _DASHBOARD_EMBEDDED_CHAT_ENABLED
     _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
@@ -3614,10 +3718,6 @@ def start_server(
             "authentication. Only use on trusted networks.", host,
         )
 
-    # Record the bound host so host_header_middleware can validate incoming
-    # Host headers against it. Defends against DNS rebinding (GHSA-ppp5-vxwm-4cf7).
-    # bound_port is also stashed so /api/pty can build the back-WS URL the
-    # PTY child uses to publish events to the dashboard sidebar.
     app.state.bound_host = host
     app.state.bound_port = port
 
@@ -3626,12 +3726,14 @@ def start_server(
 
         def _open():
             time.sleep(1.0)
-            # Prefer 127.0.0.1 over 0.0.0.0 for the local browser open —
-            # 0.0.0.0 is a bind address, not a destination.
             target_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
             webbrowser.open(f"http://{target_host}:{port}")
 
         threading.Thread(target=_open, daemon=True).start()
 
     _print_access_info(host, port)
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    _write_pidfile(port)
+    try:
+        uvicorn.run(app, host=host, port=port, log_level="warning")
+    finally:
+        _remove_pidfile()
