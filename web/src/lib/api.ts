@@ -47,6 +47,8 @@ export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   getSessions: (limit = 20, offset = 0) =>
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
+  getSession: (id: string) =>
+    fetchJSON<SessionInfo>(`/api/sessions/${encodeURIComponent(id)}`),
   getSessionMessages: (id: string) =>
     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
   deleteSession: (id: string) =>
