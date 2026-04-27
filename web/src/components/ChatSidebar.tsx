@@ -30,6 +30,7 @@ import { Card } from "@/components/ui/card";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { ToolCall, type ToolEntry } from "@/components/ToolCall";
 import { GatewayClient, type ConnectionState } from "@/lib/gatewayClient";
+import { writeActiveSession } from "@/lib/active-session";
 
 import { cn } from "@/lib/utils";
 import { AlertCircle, ChevronDown, RefreshCw } from "lucide-react";
@@ -68,9 +69,15 @@ const STATE_TONE: Record<ConnectionState, string> = {
 interface ChatSidebarProps {
   channel: string;
   className?: string;
+  /**
+   * Called whenever the gateway hands us a session id. The chat page uses
+   * this to persist the active session for mobile resume and to rewrite
+   * the URL with `?resume=…` so back/refresh nav lands on the same TUI.
+   */
+  onSession?: (sessionId: string) => void;
 }
 
-export function ChatSidebar({ channel, className }: ChatSidebarProps) {
+export function ChatSidebar({ channel, className, onSession }: ChatSidebarProps) {
   // `version` bumps on reconnect; gw is derived so we never call setState
   // for it inside an effect (React 19's set-state-in-effect rule). The
   // counter is the dependency on purpose — it's not read in the memo body,
@@ -93,6 +100,8 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
     const offSessionInfo = gw.on<SessionInfo>("session.info", (ev) => {
       if (ev.session_id) {
         setSessionId(ev.session_id);
+        writeActiveSession(ev.session_id);
+        onSession?.(ev.session_id);
       }
 
       if (ev.payload) {
@@ -123,6 +132,8 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
           return;
         }
         setSessionId(created.session_id);
+        writeActiveSession(created.session_id);
+        onSession?.(created.session_id);
       })
       .catch((e: Error) => {
         if (!cancelled) {
@@ -137,7 +148,7 @@ export function ChatSidebar({ channel, className }: ChatSidebarProps) {
       offError();
       gw.close();
     };
-  }, [gw]);
+  }, [gw, onSession]);
 
   // Event subscriber WebSocket — receives the rebroadcast of every
   // dispatcher emit from the PTY child's gateway.  See /api/pub +
