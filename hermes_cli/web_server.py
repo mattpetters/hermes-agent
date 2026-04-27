@@ -4002,6 +4002,122 @@ _mount_plugin_api_routes()
 mount_spa(app)
 
 
+_LOCALHOST_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _get_lan_ips() -> List[str]:
+    """Best-effort enumeration of LAN-reachable IPv4 addresses for this host.
+
+    Uses the standard "connect a UDP socket to a public IP and read the local
+    end" trick to find the primary outbound interface without requiring any
+    extra dependency. Falls back to socket.gethostbyname_ex() for additional
+    interfaces. Filters out loopback and link-local addresses.
+    """
+    import socket
+
+    ips: List[str] = []
+
+    # Primary outbound interface — works without actually sending a packet.
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            primary = s.getsockname()[0]
+            if primary and primary not in ips:
+                ips.append(primary)
+        finally:
+            s.close()
+    except OSError:
+        pass
+
+    # Secondary interfaces (multi-NIC, VPN, docker bridges, ...).
+    try:
+        hostname = socket.gethostname()
+        _, _, addrs = socket.gethostbyname_ex(hostname)
+        for ip in addrs:
+            if (
+                ip
+                and not ip.startswith("127.")
+                and not ip.startswith("169.254.")
+                and ip not in ips
+            ):
+                ips.append(ip)
+    except OSError:
+        pass
+
+    return ips
+
+
+def _render_qr_ascii(url: str) -> Optional[str]:
+    """Render a URL as a terminal-friendly QR code string.
+
+    Returns None if the qrcode dependency isn't importable so the caller can
+    soft-degrade — startup must never block on a nice-to-have.
+    """
+    try:
+        import qrcode  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    try:
+        import io
+
+        qr = qrcode.QRCode(border=1, box_size=1)
+        qr.add_data(url)
+        qr.make(fit=True)
+        buf = io.StringIO()
+        # invert=True → dark modules on light bg, scannable on most terminals
+        # regardless of theme. tty=True uses ANSI colour blocks for tighter
+        # output (half-height per row).
+        qr.print_ascii(out=buf, invert=True, tty=False)
+        return buf.getvalue().rstrip("\n")
+    except Exception:  # noqa: BLE001 — QR is purely cosmetic
+        return None
+
+
+def _print_access_info(host: str, port: int) -> None:
+    """Print URL(s) the user can hit, plus a QR for phone access when binding
+    to a LAN-reachable interface. Always prints something — never raises."""
+
+    bind_all = host in ("0.0.0.0", "::", "")
+    is_local = host in _LOCALHOST_HOSTS
+
+    print()
+    print("  ┌─ Hermes Web UI ──────────────────────────────────────────")
+    if is_local:
+        print(f"  │  Local      → http://{host}:{port}")
+        print(f"  │")
+        print(f"  │  For phone / LAN access:")
+        print(f"  │    hermes dashboard --host 0.0.0.0 --insecure")
+    else:
+        # Concrete bind (e.g. 192.168.x.x) or 0.0.0.0 — print whatever we know.
+        if not bind_all:
+            print(f"  │  Bound       → http://{host}:{port}")
+        print(f"  │  Local       → http://127.0.0.1:{port}")
+        lan_ips = _get_lan_ips()
+        # If user bound to a specific IP, prefer that for the QR; else first LAN IP.
+        primary_lan = host if (not bind_all and not is_local) else (lan_ips[0] if lan_ips else None)
+        for ip in lan_ips:
+            if ip == host:
+                continue
+            print(f"  │  LAN         → http://{ip}:{port}")
+        if primary_lan:
+            qr_url = f"http://{primary_lan}:{port}"
+            qr = _render_qr_ascii(qr_url)
+            if qr:
+                print(f"  │")
+                print(f"  │  Scan from a phone on the same Wi-Fi:")
+                print(f"  │    {qr_url}")
+                # Indent each QR line to align inside the box.
+                for line in qr.splitlines():
+                    print(f"  │    {line}")
+            else:
+                print(f"  │")
+                print(f"  │  Phone QR unavailable — install with:")
+                print(f"  │    pip install qrcode")
+    print("  └──────────────────────────────────────────────────────────")
+    print()
+
+
 def start_server(
     host: str = "127.0.0.1",
     port: int = 9119,
@@ -4016,14 +4132,13 @@ def start_server(
     global _DASHBOARD_EMBEDDED_CHAT_ENABLED
     _DASHBOARD_EMBEDDED_CHAT_ENABLED = embedded_chat
 
-    _LOCALHOST = ("127.0.0.1", "localhost", "::1")
-    if host not in _LOCALHOST and not allow_public:
+    if host not in _LOCALHOST_HOSTS and not allow_public:
         raise SystemExit(
             f"Refusing to bind to {host} — the dashboard exposes API keys "
             f"and config without robust authentication.\n"
             f"Use --insecure to override (NOT recommended on untrusted networks)."
         )
-    if host not in _LOCALHOST:
+    if host not in _LOCALHOST_HOSTS:
         _log.warning(
             "Binding to %s with --insecure — the dashboard has no robust "
             "authentication. Only use on trusted networks.", host,
@@ -4041,9 +4156,12 @@ def start_server(
 
         def _open():
             time.sleep(1.0)
-            webbrowser.open(f"http://{host}:{port}")
+            # Prefer 127.0.0.1 over 0.0.0.0 for the local browser open —
+            # 0.0.0.0 is a bind address, not a destination.
+            target_host = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+            webbrowser.open(f"http://{target_host}:{port}")
 
         threading.Thread(target=_open, daemon=True).start()
 
-    print(f"  Hermes Web UI → http://{host}:{port}")
+    _print_access_info(host, port)
     uvicorn.run(app, host=host, port=port, log_level="warning")
