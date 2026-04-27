@@ -1,5 +1,5 @@
 import { Typography } from "@nous-research/ui";
-import { useI18n } from "@/i18n/context";
+import { useI18n } from "@/i18n";
 
 /**
  * Compact language toggle — shows a clickable flag that switches between
