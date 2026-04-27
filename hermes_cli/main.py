@@ -7955,12 +7955,15 @@ def cmd_dashboard(args):
 
     from hermes_cli.web_server import start_server
 
+    # Phone-connect mode is the default; --localhost flips back to loopback-only.
+    host = "127.0.0.1" if getattr(args, "localhost", False) else args.host
+
     embedded_chat = args.tui or os.environ.get("HERMES_DASHBOARD_TUI") == "1"
     start_server(
-        host=args.host,
+        host=host,
         port=args.port,
         open_browser=not args.no_open,
-        allow_public=getattr(args, "insecure", False),
+        allow_public=getattr(args, "insecure", False) and not getattr(args, "localhost", False),
         embedded_chat=embedded_chat,
     )
 
@@ -10014,7 +10017,15 @@ Examples:
         "--port", type=int, default=9119, help="Port (default 9119)"
     )
     dashboard_parser.add_argument(
-        "--host", default="127.0.0.1", help="Host (default 127.0.0.1)"
+        "--host",
+        default="0.0.0.0",
+        help="Host to bind (default 0.0.0.0 — accessible on LAN for phone access). "
+             "Use --localhost for loopback-only.",
+    )
+    dashboard_parser.add_argument(
+        "--localhost",
+        action="store_true",
+        help="Bind to 127.0.0.1 only (overrides --host, disables LAN/phone access).",
     )
     dashboard_parser.add_argument(
         "--no-open", action="store_true", help="Don't open browser automatically"
@@ -10022,7 +10033,15 @@ Examples:
     dashboard_parser.add_argument(
         "--insecure",
         action="store_true",
-        help="Allow binding to non-localhost (DANGEROUS: exposes API keys on the network)",
+        default=True,
+        help="Allow binding to non-localhost (default ON since LAN bind is the default; "
+             "auto-implied when host != 127.0.0.1).",
+    )
+    dashboard_parser.add_argument(
+        "--secure",
+        dest="insecure",
+        action="store_false",
+        help="Disable --insecure (refuses to bind to non-localhost without it).",
     )
     dashboard_parser.add_argument(
         "--tui",
