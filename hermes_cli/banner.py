@@ -365,6 +365,146 @@ def get_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
     return {"upstream": upstream, "local": local, "ahead": max(ahead, 0)}
 
 
+def _git_remote_url(repo_dir: Path, remote: str) -> Optional[str]:
+    """Return the configured URL for a git remote, or None."""
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", remote],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            cwd=str(repo_dir),
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    value = (result.stdout or "").strip()
+    return value or None
+
+
+def _parse_owner_repo(remote_url: str) -> Optional[str]:
+    """Extract 'owner/repo' from an https or ssh git remote URL."""
+    if not remote_url:
+        return None
+    s = remote_url.strip()
+    # https://github.com/owner/repo(.git)
+    # git@github.com:owner/repo(.git)
+    for prefix in ("https://github.com/", "git@github.com:"):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    else:
+        return None
+    if s.endswith(".git"):
+        s = s[:-4]
+    return s if "/" in s else None
+
+
+# Cache the upstream-fetch state across the process lifetime so the banner
+# count stays fresh without blocking startup or every command.
+_fork_state_cache: Optional[dict] = None
+_fork_fetch_done = threading.Event()
+
+
+def prefetch_upstream_fetch() -> None:
+    """Background-fetch ``upstream/main`` so the banner count is fresh.
+
+    Quietly no-ops if there's no ``upstream`` remote (i.e., the user isn't
+    on a fork). Runs in a daemon thread — never blocks startup.
+    """
+    def _run() -> None:
+        global _fork_state_cache
+        try:
+            repo_dir = _resolve_repo_dir()
+            if repo_dir is None:
+                return
+            if _git_remote_url(repo_dir, "upstream") is None:
+                return  # Not a fork — nothing to fetch
+            subprocess.run(
+                ["git", "fetch", "--quiet", "upstream", "main"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=str(repo_dir),
+            )
+        except Exception:
+            pass
+        finally:
+            # Invalidate cache so next get_fork_state() re-reads
+            _fork_state_cache = None
+            _fork_fetch_done.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+
+def get_fork_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
+    """Return fork status vs. ``upstream/main``, or None if not a fork.
+
+    Returns a dict with:
+      - ``owner_repo``: str, e.g. "mattpetters/hermes-agent"
+      - ``upstream_owner_repo``: str, e.g. "NousResearch/hermes-agent"
+      - ``behind``: int, commits HEAD is behind upstream/main
+      - ``ahead``: int, commits HEAD is ahead of upstream/main
+
+    Cached across the process. Reads from the local git refs only — call
+    ``prefetch_upstream_fetch()`` at startup to keep the upstream ref fresh.
+    """
+    global _fork_state_cache
+    if _fork_state_cache is not None:
+        return _fork_state_cache or None
+
+    repo_dir = repo_dir or _resolve_repo_dir()
+    if repo_dir is None:
+        _fork_state_cache = {}  # falsy sentinel
+        return None
+
+    origin_url = _git_remote_url(repo_dir, "origin")
+    upstream_url = _git_remote_url(repo_dir, "upstream")
+    if not origin_url or not upstream_url:
+        _fork_state_cache = {}
+        return None
+
+    owner_repo = _parse_owner_repo(origin_url)
+    upstream_owner_repo = _parse_owner_repo(upstream_url)
+    if not owner_repo or not upstream_owner_repo:
+        _fork_state_cache = {}
+        return None
+
+    # If origin and upstream point at the same repo, this isn't a fork.
+    if owner_repo.lower() == upstream_owner_repo.lower():
+        _fork_state_cache = {}
+        return None
+
+    behind = 0
+    ahead = 0
+    try:
+        # left..right counts commits in right not in left
+        result = subprocess.run(
+            ["git", "rev-list", "--left-right", "--count", "HEAD...upstream/main"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(repo_dir),
+        )
+        if result.returncode == 0:
+            parts = (result.stdout or "").split()
+            if len(parts) == 2:
+                ahead = int(parts[0] or "0")
+                behind = int(parts[1] or "0")
+    except Exception:
+        pass
+
+    _fork_state_cache = {
+        "owner_repo": owner_repo,
+        "upstream_owner_repo": upstream_owner_repo,
+        "behind": max(behind, 0),
+        "ahead": max(ahead, 0),
+    }
+    return _fork_state_cache
+
+
 _RELEASE_URL_BASE = "https://github.com/NousResearch/hermes-agent/releases/tag"
 _latest_release_cache: Optional[tuple] = None  # (tag, url) once resolved
 
@@ -655,6 +795,31 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
             right_lines.append(f"[dim {dim}]{category}:[/] [{text}]{skills_str}[/]")
     else:
         right_lines.append(f"[dim {dim}]No skills installed[/]")
+
+    # Fork indicator — shown only when origin != upstream (i.e., on a fork).
+    # Red escalation at >=50 commits behind so drift stays visible.
+    try:
+        fork_state = get_fork_state()
+        if fork_state:
+            behind = int(fork_state.get("behind") or 0)
+            ahead = int(fork_state.get("ahead") or 0)
+            owner_repo = fork_state.get("owner_repo") or "fork"
+            upstream_repo = fork_state.get("upstream_owner_repo") or "upstream"
+            parts = [f"[{text}]{owner_repo}[/]"]
+            if behind <= 0:
+                parts.append(f"[dim {dim}]· up to date with {upstream_repo}[/]")
+            elif behind >= 50:
+                parts.append(
+                    f"[bold red]· {behind} behind {upstream_repo} — run /sync-fork[/]"
+                )
+            else:
+                parts.append(f"[dim {dim}]· {behind} behind {upstream_repo}[/]")
+            if ahead > 0:
+                parts.append(f"[dim {dim}](+{ahead} local)[/]")
+            right_lines.append("")
+            right_lines.append(f"[bold {accent}]Fork:[/] " + " ".join(parts))
+    except Exception:
+        pass  # Never break the banner over the fork indicator
 
     right_lines.append("")
     mcp_connected = sum(1 for s in mcp_status if s["connected"]) if mcp_status else 0
