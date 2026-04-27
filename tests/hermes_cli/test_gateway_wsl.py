@@ -130,6 +130,7 @@ class TestSupportsSystemdServicesWSL:
         monkeypatch.setattr(gateway, "is_termux", lambda: False)
         monkeypatch.setattr(gateway, "is_wsl", lambda: True)
         monkeypatch.setattr(gateway, "_wsl_systemd_operational", lambda: True)
+        monkeypatch.setattr(gateway.shutil, "which", lambda _: "/usr/bin/systemctl")
         assert gateway.supports_systemd_services() is True
 
     def test_wsl_without_systemd(self, monkeypatch):
@@ -138,6 +139,7 @@ class TestSupportsSystemdServicesWSL:
         monkeypatch.setattr(gateway, "is_termux", lambda: False)
         monkeypatch.setattr(gateway, "is_wsl", lambda: True)
         monkeypatch.setattr(gateway, "_wsl_systemd_operational", lambda: False)
+        monkeypatch.setattr(gateway.shutil, "which", lambda _: "/usr/bin/systemctl")
         assert gateway.supports_systemd_services() is False
 
     def test_native_linux(self, monkeypatch):
@@ -145,6 +147,8 @@ class TestSupportsSystemdServicesWSL:
         monkeypatch.setattr(gateway, "is_linux", lambda: True)
         monkeypatch.setattr(gateway, "is_termux", lambda: False)
         monkeypatch.setattr(gateway, "is_wsl", lambda: False)
+        monkeypatch.setattr(gateway, "is_container", lambda: False)
+        monkeypatch.setattr(gateway.shutil, "which", lambda _: "/usr/bin/systemctl")
         assert gateway.supports_systemd_services() is True
 
     def test_termux_still_excluded(self, monkeypatch):
