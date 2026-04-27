@@ -183,8 +183,135 @@ def check_for_updates() -> Optional[int]:
     return behind
 
 
+# =========================================================================
+# Recent sessions (v1: title-based, instant — no LLM at boot)
+# =========================================================================
+
+def get_recent_sessions_for_banner(
+    limit: int = 10,
+    exclude_session_id: Optional[str] = None,
+) -> List[dict]:
+    """Return up to ``limit`` recent real sessions for the startup banner.
+
+    Filters:
+      - excludes cron/gateway sources (no banner value)
+      - excludes the currently-starting session (``exclude_session_id``)
+      - requires at least 2 messages (skips empty/aborted sessions)
+
+    Returns dicts with ``id``, ``source``, ``title``, ``preview``,
+    ``message_count``, ``last_active`` (unix ts). Falls back to
+    ``preview`` when ``title`` is null.
+    """
+    try:
+        from hermes_state import SessionDB
+    except Exception:
+        return []
+    try:
+        db = SessionDB()
+    except Exception:
+        return []
+    try:
+        # Fetch a wider window since we filter by message_count and exclude
+        # the active session locally.
+        rows = db.list_sessions_rich(
+            limit=limit * 4 + 10,
+            exclude_sources=["gateway:cron", "cron", "tui"],
+        )
+    except Exception:
+        return []
+
+    out: List[dict] = []
+    for s in rows:
+        if exclude_session_id and s.get("id") == exclude_session_id:
+            continue
+        if (s.get("message_count") or 0) < 2:
+            continue
+        out.append(s)
+
+    # Sort by last activity (most recent first), then trim to limit.
+    out.sort(
+        key=lambda s: s.get("last_active") or s.get("started_at") or 0,
+        reverse=True,
+    )
+    return out[:limit]
+
+
+def _format_relative_time(ts: Optional[float]) -> str:
+    """Format a unix timestamp as a short relative-time string."""
+    if not ts:
+        return ""
+    delta = time.time() - ts
+    if delta < 0:
+        return "just now"
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta / 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta / 3600)}h ago"
+    if delta < 86400 * 7:
+        return f"{int(delta / 86400)}d ago"
+    return f"{int(delta / 86400 / 7)}w ago"
+
+
+def build_recent_sessions_panel(
+    console: Console,
+    exclude_session_id: Optional[str] = None,
+    limit: int = 10,
+) -> None:
+    """Print a full-width panel below the welcome banner listing recent sessions.
+
+    v1 implementation: uses the auto-generated session ``title`` (or first user
+    message preview as fallback). No LLM call at boot — instant.
+    """
+    sessions = get_recent_sessions_for_banner(
+        limit=limit, exclude_session_id=exclude_session_id
+    )
+    if not sessions:
+        return
+
+    accent = _skin_color("banner_accent", "#FFBF00")
+    dim = _skin_color("banner_dim", "#B8860B")
+    text = _skin_color("banner_text", "#FFF8DC")
+    border_color = _skin_color("banner_border", "#CD7F32")
+    title_color = _skin_color("banner_title", "#FFD700")
+
+    table = Table.grid(padding=(0, 2), expand=True)
+    table.add_column("when", justify="right", no_wrap=True)
+    table.add_column("source", justify="left", no_wrap=True)
+    table.add_column("msgs", justify="right", no_wrap=True)
+    table.add_column("blurb", justify="left", ratio=1)
+
+    for s in sessions:
+        when = _format_relative_time(s.get("last_active") or s.get("started_at"))
+        source = s.get("source") or "?"
+        msgs = s.get("message_count") or 0
+        blurb = (s.get("title") or s.get("preview") or "").strip()
+        if not blurb:
+            blurb = "(no messages)"
+        # Trim hard so we never wrap awkwardly
+        if len(blurb) > 90:
+            blurb = blurb[:87] + "..."
+        table.add_row(
+            f"[dim {dim}]{when}[/]",
+            f"[dim {dim}]{source}[/]",
+            f"[dim {dim}]{msgs}m[/]",
+            f"[{text}]{blurb}[/]",
+        )
+
+    panel = Panel(
+        table,
+        title=f"[bold {title_color}]Recent Sessions[/]",
+        border_style=border_color,
+        padding=(0, 2),
+    )
+    console.print()
+    console.print(panel)
+
+
 def _resolve_repo_dir() -> Optional[Path]:
     """Return the active Hermes git checkout, or None if this isn't a git install."""
+
     hermes_home = get_hermes_home()
     repo_dir = hermes_home / "hermes-agent"
     if not (repo_dir / ".git").exists():

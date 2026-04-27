@@ -3494,6 +3494,18 @@ class HermesCLI:
                 session_id=self.session_id,
                 context_length=ctx_len,
             )
+
+            # Recent sessions panel — full-width, below the banner.
+            try:
+                from hermes_cli.banner import build_recent_sessions_panel
+                build_recent_sessions_panel(
+                    console=self.console,
+                    exclude_session_id=self.session_id,
+                    limit=10,
+                )
+            except Exception:
+                pass  # Never break startup over the recent-sessions panel
+
         
         # Show tool availability warnings if any tools are disabled
         self._show_tool_availability_warnings()
