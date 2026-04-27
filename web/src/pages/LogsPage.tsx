@@ -138,6 +138,8 @@ export default function LogsPage() {
   ]);
 
   useEffect(() => {
+    // Initial fetch on mount; fetchLogs() uses setState internally.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchLogs();
   }, [fetchLogs]);
 
