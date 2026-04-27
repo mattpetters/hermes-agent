@@ -1336,7 +1336,8 @@ class SessionDB:
         # "大 AND 别 AND 山 AND 项 AND 目".  This produces false positives
         # (all chars scattered in a message) and misses exact phrase matches.
         # LIKE substring search is more accurate for CJK phrase matching.
-        if self._contains_cjk(query):
+        is_cjk = self._contains_cjk(query)
+        if is_cjk:
             matches = []
         else:
             with self._lock:
@@ -1348,11 +1349,15 @@ class SessionDB:
                 else:
                     matches = [dict(row) for row in cursor.fetchall()]
 
-        # LIKE search for CJK queries (primary path) or CJK fallback
-        if not matches and self._contains_cjk(query):
+        # LIKE substring search for CJK queries (primary path since FTS5
+        # cannot do phrase matching with the unicode61 tokenizer).
+        if not matches and is_cjk:
             raw_query = query.strip('"').strip()
-            like_where = ["m.content LIKE ?"]
-            like_params: list = [f"%{raw_query}%"]
+            # Escape LIKE wildcards so literal %, _ in the query
+            # are not treated as single/multi-char wildcards.
+            escaped = raw_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like_where = ["m.content LIKE ? ESCAPE '\\'"]
+            like_params: list = [f"%{escaped}%"]
             if source_filter is not None:
                 like_where.append(f"s.source IN ({','.join('?' for _ in source_filter)})")
                 like_params.extend(source_filter)
