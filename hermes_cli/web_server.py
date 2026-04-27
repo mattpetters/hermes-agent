@@ -4275,6 +4275,31 @@ def start_server(
     app.state.bound_host = host
     app.state.bound_port = port
 
+    # Sweep stale empty sessions left over from prior dashboard runs —
+    # every chat-page mount creates a session row before the user types
+    # anything, so backgrounding/refreshing the dashboard tab pollutes
+    # the sessions list with rows that have message_count=0 and no
+    # transcript. We only touch *ended* sessions older than 60s so we
+    # never race a live one.
+    try:
+        from hermes_state import SessionDB
+        from hermes_cli.config import get_hermes_home as _get_home
+
+        _state_path = _get_home() / "state.db"
+        if _state_path.exists():
+            _db = SessionDB(str(_state_path))
+            try:
+                pruned = _db.prune_empty_sessions(
+                    sessions_dir=_get_home() / "sessions",
+                    min_age_seconds=60,
+                )
+                if pruned:
+                    _log.info("Dashboard startup: pruned %d empty session rows", pruned)
+            finally:
+                _db.close()
+    except Exception as exc:
+        _log.warning("Dashboard startup empty-session prune failed: %s", exc)
+
     if open_browser:
         import webbrowser
 
