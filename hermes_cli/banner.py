@@ -224,6 +224,132 @@ def check_for_updates() -> Optional[int]:
     return behind
 
 
+# =========================================================================
+# Recent sessions (v1: title-based, instant — no LLM at boot)
+# =========================================================================
+
+def get_recent_sessions_for_banner(
+    limit: int = 10,
+    exclude_session_id: Optional[str] = None,
+) -> List[dict]:
+    """Return up to ``limit`` recent real sessions for the startup banner.
+
+    Filters:
+      - excludes cron/gateway sources (no banner value)
+      - excludes the currently-starting session (``exclude_session_id``)
+      - requires at least 2 messages (skips empty/aborted sessions)
+
+    Returns dicts with ``id``, ``source``, ``title``, ``preview``,
+    ``message_count``, ``last_active`` (unix ts). Falls back to
+    ``preview`` when ``title`` is null.
+    """
+    try:
+        from hermes_state import SessionDB
+    except Exception:
+        return []
+    try:
+        db = SessionDB()
+    except Exception:
+        return []
+    try:
+        # Fetch a wider window since we filter by message_count and exclude
+        # the active session locally.
+        rows = db.list_sessions_rich(
+            limit=limit * 4 + 10,
+            exclude_sources=["gateway:cron", "cron", "tui"],
+        )
+    except Exception:
+        return []
+
+    out: List[dict] = []
+    for s in rows:
+        if exclude_session_id and s.get("id") == exclude_session_id:
+            continue
+        if (s.get("message_count") or 0) < 2:
+            continue
+        out.append(s)
+
+    # Sort by last activity (most recent first), then trim to limit.
+    out.sort(
+        key=lambda s: s.get("last_active") or s.get("started_at") or 0,
+        reverse=True,
+    )
+    return out[:limit]
+
+
+def _format_relative_time(ts: Optional[float]) -> str:
+    """Format a unix timestamp as a short relative-time string."""
+    if not ts:
+        return ""
+    delta = time.time() - ts
+    if delta < 0:
+        return "just now"
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta / 60)}m ago"
+    if delta < 86400:
+        return f"{int(delta / 3600)}h ago"
+    if delta < 86400 * 7:
+        return f"{int(delta / 86400)}d ago"
+    return f"{int(delta / 86400 / 7)}w ago"
+
+
+def build_recent_sessions_panel(
+    console: Console,
+    exclude_session_id: Optional[str] = None,
+    limit: int = 10,
+) -> None:
+    """Print a full-width panel below the welcome banner listing recent sessions.
+
+    v1 implementation: uses the auto-generated session ``title`` (or first user
+    message preview as fallback). No LLM call at boot — instant.
+    """
+    sessions = get_recent_sessions_for_banner(
+        limit=limit, exclude_session_id=exclude_session_id
+    )
+    if not sessions:
+        return
+
+    accent = _skin_color("banner_accent", "#FFBF00")
+    dim = _skin_color("banner_dim", "#B8860B")
+    text = _skin_color("banner_text", "#FFF8DC")
+    border_color = _skin_color("banner_border", "#CD7F32")
+    title_color = _skin_color("banner_title", "#FFD700")
+
+    table = Table.grid(padding=(0, 2), expand=True)
+    table.add_column("when", justify="right", no_wrap=True)
+    table.add_column("source", justify="left", no_wrap=True)
+    table.add_column("msgs", justify="right", no_wrap=True)
+    table.add_column("blurb", justify="left", ratio=1)
+
+    for s in sessions:
+        when = _format_relative_time(s.get("last_active") or s.get("started_at"))
+        source = s.get("source") or "?"
+        msgs = s.get("message_count") or 0
+        blurb = (s.get("title") or s.get("preview") or "").strip()
+        if not blurb:
+            blurb = "(no messages)"
+        # Trim hard so we never wrap awkwardly
+        if len(blurb) > 90:
+            blurb = blurb[:87] + "..."
+        table.add_row(
+            f"[dim {dim}]{when}[/]",
+            f"[dim {dim}]{source}[/]",
+            f"[dim {dim}]{msgs}m[/]",
+            f"[{text}]{blurb}[/]",
+        )
+
+    panel = Panel(
+        table,
+        title=f"[bold {title_color}]Recent Sessions[/]",
+        border_style=border_color,
+        padding=(0, 2),
+    )
+    console.print()
+    console.print(panel)
+
+
 def _resolve_repo_dir() -> Optional[Path]:
     """Return the active Hermes git checkout, or None if this isn't a git install.
 
@@ -282,6 +408,146 @@ def get_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
         ahead = 0
 
     return {"upstream": upstream, "local": local, "ahead": max(ahead, 0)}
+
+
+def _git_remote_url(repo_dir: Path, remote: str) -> Optional[str]:
+    """Return the configured URL for a git remote, or None."""
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", remote],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            cwd=str(repo_dir),
+        )
+    except Exception:
+        return None
+    if result.returncode != 0:
+        return None
+    value = (result.stdout or "").strip()
+    return value or None
+
+
+def _parse_owner_repo(remote_url: str) -> Optional[str]:
+    """Extract 'owner/repo' from an https or ssh git remote URL."""
+    if not remote_url:
+        return None
+    s = remote_url.strip()
+    # https://github.com/owner/repo(.git)
+    # git@github.com:owner/repo(.git)
+    for prefix in ("https://github.com/", "git@github.com:"):
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    else:
+        return None
+    if s.endswith(".git"):
+        s = s[:-4]
+    return s if "/" in s else None
+
+
+# Cache the upstream-fetch state across the process lifetime so the banner
+# count stays fresh without blocking startup or every command.
+_fork_state_cache: Optional[dict] = None
+_fork_fetch_done = threading.Event()
+
+
+def prefetch_upstream_fetch() -> None:
+    """Background-fetch ``upstream/main`` so the banner count is fresh.
+
+    Quietly no-ops if there's no ``upstream`` remote (i.e., the user isn't
+    on a fork). Runs in a daemon thread — never blocks startup.
+    """
+    def _run() -> None:
+        global _fork_state_cache
+        try:
+            repo_dir = _resolve_repo_dir()
+            if repo_dir is None:
+                return
+            if _git_remote_url(repo_dir, "upstream") is None:
+                return  # Not a fork — nothing to fetch
+            subprocess.run(
+                ["git", "fetch", "--quiet", "upstream", "main"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=str(repo_dir),
+            )
+        except Exception:
+            pass
+        finally:
+            # Invalidate cache so next get_fork_state() re-reads
+            _fork_state_cache = None
+            _fork_fetch_done.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+
+def get_fork_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
+    """Return fork status vs. ``upstream/main``, or None if not a fork.
+
+    Returns a dict with:
+      - ``owner_repo``: str, e.g. "mattpetters/hermes-agent"
+      - ``upstream_owner_repo``: str, e.g. "NousResearch/hermes-agent"
+      - ``behind``: int, commits HEAD is behind upstream/main
+      - ``ahead``: int, commits HEAD is ahead of upstream/main
+
+    Cached across the process. Reads from the local git refs only — call
+    ``prefetch_upstream_fetch()`` at startup to keep the upstream ref fresh.
+    """
+    global _fork_state_cache
+    if _fork_state_cache is not None:
+        return _fork_state_cache or None
+
+    repo_dir = repo_dir or _resolve_repo_dir()
+    if repo_dir is None:
+        _fork_state_cache = {}  # falsy sentinel
+        return None
+
+    origin_url = _git_remote_url(repo_dir, "origin")
+    upstream_url = _git_remote_url(repo_dir, "upstream")
+    if not origin_url or not upstream_url:
+        _fork_state_cache = {}
+        return None
+
+    owner_repo = _parse_owner_repo(origin_url)
+    upstream_owner_repo = _parse_owner_repo(upstream_url)
+    if not owner_repo or not upstream_owner_repo:
+        _fork_state_cache = {}
+        return None
+
+    # If origin and upstream point at the same repo, this isn't a fork.
+    if owner_repo.lower() == upstream_owner_repo.lower():
+        _fork_state_cache = {}
+        return None
+
+    behind = 0
+    ahead = 0
+    try:
+        # left..right counts commits in right not in left
+        result = subprocess.run(
+            ["git", "rev-list", "--left-right", "--count", "HEAD...upstream/main"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(repo_dir),
+        )
+        if result.returncode == 0:
+            parts = (result.stdout or "").split()
+            if len(parts) == 2:
+                ahead = int(parts[0] or "0")
+                behind = int(parts[1] or "0")
+    except Exception:
+        pass
+
+    _fork_state_cache = {
+        "owner_repo": owner_repo,
+        "upstream_owner_repo": upstream_owner_repo,
+        "behind": max(behind, 0),
+        "ahead": max(ahead, 0),
+    }
+    return _fork_state_cache
 
 
 _RELEASE_URL_BASE = "https://github.com/NousResearch/hermes-agent/releases/tag"
@@ -574,6 +840,31 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
             right_lines.append(f"[dim {dim}]{category}:[/] [{text}]{skills_str}[/]")
     else:
         right_lines.append(f"[dim {dim}]No skills installed[/]")
+
+    # Fork indicator — shown only when origin != upstream (i.e., on a fork).
+    # Red escalation at >=50 commits behind so drift stays visible.
+    try:
+        fork_state = get_fork_state()
+        if fork_state:
+            behind = int(fork_state.get("behind") or 0)
+            ahead = int(fork_state.get("ahead") or 0)
+            owner_repo = fork_state.get("owner_repo") or "fork"
+            upstream_repo = fork_state.get("upstream_owner_repo") or "upstream"
+            parts = [f"[{text}]{owner_repo}[/]"]
+            if behind <= 0:
+                parts.append(f"[dim {dim}]· up to date with {upstream_repo}[/]")
+            elif behind >= 50:
+                parts.append(
+                    f"[bold red]· {behind} behind {upstream_repo} — run /sync-fork[/]"
+                )
+            else:
+                parts.append(f"[dim {dim}]· {behind} behind {upstream_repo}[/]")
+            if ahead > 0:
+                parts.append(f"[dim {dim}](+{ahead} local)[/]")
+            right_lines.append("")
+            right_lines.append(f"[bold {accent}]Fork:[/] " + " ".join(parts))
+    except Exception:
+        pass  # Never break the banner over the fork indicator
 
     right_lines.append("")
     mcp_connected = sum(1 for s in mcp_status if s["connected"]) if mcp_status else 0
