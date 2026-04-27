@@ -54,6 +54,7 @@ import { ChatSidebar } from "@/components/ChatSidebar";
 import { usePageHeader } from "@/contexts/usePageHeader";
 import { useI18n } from "@/i18n";
 import { PluginSlot } from "@/plugins";
+import { api } from "@/lib/api";
 import {
   type ActiveChatSession,
   readActiveSession,
@@ -195,6 +196,29 @@ export default function ChatPage() {
   const [candidate, setCandidate] = useState<ActiveChatSession | null>(() =>
     typeof window === "undefined" ? null : readActiveSession(),
   );
+
+  // Validate the persisted candidate against the server. If the row was
+  // pruned (empty-session sweep on dashboard restart, manual delete from
+  // /sessions, fork to a different machine) we don't want to offer
+  // "Resume" — the TUI would try `--resume <missing>` and the agent
+  // would print `error: session not found`. Clear the localStorage entry
+  // so the picker shows "Start new" only.
+  useEffect(() => {
+    if (!candidate?.id) return;
+    let cancelled = false;
+    api
+      .getSession(candidate.id)
+      .catch(() => {
+        if (cancelled) return;
+        clearActiveSession();
+        setCandidate(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // We deliberately only revalidate on mount or when the id changes —
+    // re-running on every render would hammer the server.
+  }, [candidate?.id]);
 
   // Reconnect bookkeeping: bump `wsEpoch` to force a new WebSocket while
   // keeping xterm alive. `attemptsRef` tracks consecutive failures so the
