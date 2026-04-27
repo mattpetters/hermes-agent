@@ -7654,6 +7654,15 @@ def cmd_profile(args):
 
 def cmd_dashboard(args):
     """Start the web UI server."""
+    # --stop short-circuit (no need for fastapi/uvicorn just to kill a process)
+    if getattr(args, "stop", False):
+        from hermes_cli.web_server import stop_running_dashboard
+        if stop_running_dashboard():
+            print("Dashboard stopped.")
+        else:
+            print("No dashboard running (no pidfile, or stale).")
+        return
+
     try:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401
@@ -10041,6 +10050,11 @@ Examples:
         dest="insecure",
         action="store_false",
         help="Disable --insecure (refuses to bind to non-localhost without it).",
+    )
+    dashboard_parser.add_argument(
+        "--stop",
+        action="store_true",
+        help="Stop the running dashboard (uses pidfile at $HERMES_HOME/dashboard.pid).",
     )
     dashboard_parser.add_argument(
         "--tui",
