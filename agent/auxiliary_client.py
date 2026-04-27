@@ -1633,7 +1633,7 @@ def _to_async_client(sync_client, model: str):
     except ImportError:
         pass
     try:
-        from agent.copilot_acp_client import CopilotACPClient
+        from acp_adapter.copilot_client import CopilotACPClient
         if isinstance(sync_client, CopilotACPClient):
             return sync_client, model
     except ImportError:
@@ -2040,7 +2040,7 @@ def resolve_provider_client(
                     "process credentials are incomplete"
                 )
                 return None, None
-            from agent.copilot_acp_client import CopilotACPClient
+            from acp_adapter.copilot_client import CopilotACPClient
 
             client = CopilotACPClient(
                 api_key=api_key,

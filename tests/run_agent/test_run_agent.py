@@ -3825,7 +3825,7 @@ def test_aiagent_uses_copilot_acp_client():
         patch("run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")),
         patch("run_agent.check_toolset_requirements", return_value={}),
         patch("run_agent.OpenAI") as mock_openai,
-        patch("agent.copilot_acp_client.CopilotACPClient") as mock_acp_client,
+        patch("acp_adapter.copilot_client.CopilotACPClient") as mock_acp_client,
     ):
         acp_client = MagicMock()
         mock_acp_client.return_value = acp_client

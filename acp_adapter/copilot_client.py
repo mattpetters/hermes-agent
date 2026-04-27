@@ -1,11 +1,11 @@
-"""Backward-compatibility shim.
+"""OpenAI-compatible shim that forwards Hermes requests to `copilot --acp`.
 
-CopilotACPClient has moved to acp_adapter/copilot_client.py.
-This module re-exports it so existing callers continue to work.
+This adapter lets Hermes treat the GitHub Copilot ACP server as a chat-style
+backend. Each request starts a short-lived ACP session, sends the formatted
+conversation as a single prompt, collects text chunks, and converts the result
+back into the minimal shape Hermes expects from an OpenAI client.
 """
-from acp_adapter.copilot_client import CopilotACPClient  # noqa: F401
 
-<<<<<<< HEAD
 from __future__ import annotations
 
 import json
@@ -28,7 +28,10 @@ ACP_MARKER_BASE_URL = "acp://copilot"
 _DEFAULT_TIMEOUT_SECONDS = 900.0
 
 _TOOL_CALL_BLOCK_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
-_TOOL_CALL_JSON_RE = re.compile(r"\{\s*\"id\"\s*:\s*\"[^\"]+\"\s*,\s*\"type\"\s*:\s*\"function\"\s*,\s*\"function\"\s*:\s*\{.*?\}\s*\}", re.DOTALL)
+_TOOL_CALL_JSON_RE = re.compile(
+    r"\{\s*\"id\"\s*:\s*\"[^\"]+\"\s*,\s*\"type\"\s*:\s*\"function\"\s*,\s*\"function\"\s*:\s*\{.*?\}\s*\}",
+    re.DOTALL,
+)
 
 
 def _resolve_command() -> str:
@@ -44,47 +47,6 @@ def _resolve_args() -> list[str]:
     if not raw:
         return ["--acp", "--stdio"]
     return shlex.split(raw)
-
-
-def _resolve_home_dir() -> str:
-    """Return a stable HOME for child ACP processes."""
-
-    try:
-        from hermes_constants import get_subprocess_home
-
-        profile_home = get_subprocess_home()
-        if profile_home:
-            return profile_home
-    except Exception:
-        pass
-
-    home = os.environ.get("HOME", "").strip()
-    if home:
-        return home
-
-    expanded = os.path.expanduser("~")
-    if expanded and expanded != "~":
-        return expanded
-
-    try:
-        import pwd
-
-        resolved = pwd.getpwuid(os.getuid()).pw_dir.strip()
-        if resolved:
-            return resolved
-    except Exception:
-        pass
-
-    # Last resort: /tmp (writable on any POSIX system). Avoids crashing the
-    # subprocess with no HOME; callers can set HERMES_HOME explicitly if they
-    # need a different writable dir.
-    return "/tmp"
-
-
-def _build_subprocess_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env["HOME"] = _resolve_home_dir()
-    return env
 
 
 def _jsonrpc_error(message_id: Any, code: int, message: str) -> dict[str, Any]:
@@ -152,7 +114,9 @@ def _format_messages_as_prompt(
             )
 
     if tool_choice is not None:
-        sections.append(f"Tool choice hint: {json.dumps(tool_choice, ensure_ascii=False)}")
+        sections.append(
+            f"Tool choice hint: {json.dumps(tool_choice, ensure_ascii=False)}"
+        )
 
     transcript: list[str] = []
     for message in messages:
@@ -182,7 +146,9 @@ def _format_messages_as_prompt(
         sections.append("Conversation transcript:\n\n" + "\n\n".join(transcript))
 
     sections.append("Continue the conversation from the latest user request.")
-    return "\n\n".join(section.strip() for section in sections if section and section.strip())
+    return "\n\n".join(
+        section.strip() for section in sections if section and section.strip()
+    )
 
 
 def _render_message_content(content: Any) -> str:
@@ -234,7 +200,7 @@ def _extract_tool_calls_from_text(text: str) -> tuple[list[SimpleNamespace], str
             fn_args = json.dumps(fn_args, ensure_ascii=False)
         call_id = obj.get("id")
         if not isinstance(call_id, str) or not call_id.strip():
-            call_id = f"acp_call_{len(extracted)+1}"
+            call_id = f"acp_call_{len(extracted) + 1}"
 
         extracted.append(
             SimpleNamespace(
@@ -282,7 +248,6 @@ def _extract_tool_calls_from_text(text: str) -> tuple[list[SimpleNamespace], str
     return extracted, cleaned
 
 
-
 def _ensure_path_within_cwd(path_text: str, cwd: str) -> Path:
     candidate = Path(path_text)
     if not candidate.is_absolute():
@@ -292,12 +257,14 @@ def _ensure_path_within_cwd(path_text: str, cwd: str) -> Path:
     try:
         resolved.relative_to(root)
     except ValueError as exc:
-        raise PermissionError(f"Path '{resolved}' is outside the session cwd '{root}'.") from exc
+        raise PermissionError(
+            f"Path '{resolved}' is outside the session cwd '{root}'."
+        ) from exc
     return resolved
 
 
 class _ACPChatCompletions:
-    def __init__(self, client: "CopilotACPClient"):
+    def __init__(self, client: CopilotACPClient):
         self._client = client
 
     def create(self, **kwargs: Any) -> Any:
@@ -305,7 +272,7 @@ class _ACPChatCompletions:
 
 
 class _ACPChatNamespace:
-    def __init__(self, client: "CopilotACPClient"):
+    def __init__(self, client: CopilotACPClient):
         self.completions = _ACPChatCompletions(client)
 
 
@@ -413,7 +380,9 @@ class CopilotACPClient:
             model=model or "copilot-acp",
         )
 
-    def _run_prompt(self, prompt_text: str, *, timeout_seconds: float) -> tuple[str, str]:
+    def _run_prompt(
+        self, prompt_text: str, *, timeout_seconds: float
+    ) -> tuple[str, str]:
         try:
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args,
@@ -423,7 +392,6 @@ class CopilotACPClient:
                 text=True,
                 bufsize=1,
                 cwd=self._acp_cwd,
-                env=_build_subprocess_env(),
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
@@ -464,7 +432,13 @@ class CopilotACPClient:
 
         next_id = 0
 
-        def _request(method: str, params: dict[str, Any], *, text_parts: list[str] | None = None, reasoning_parts: list[str] | None = None) -> Any:
+        def _request(
+            method: str,
+            params: dict[str, Any],
+            *,
+            text_parts: list[str] | None = None,
+            reasoning_parts: list[str] | None = None,
+        ) -> Any:
             nonlocal next_id
             next_id += 1
             request_id = next_id
@@ -474,6 +448,7 @@ class CopilotACPClient:
                 "method": method,
                 "params": params,
             }
+            assert proc.stdin is not None  # always set: Popen(stdin=PIPE)
             proc.stdin.write(json.dumps(payload) + "\n")
             proc.stdin.flush()
 
@@ -507,7 +482,9 @@ class CopilotACPClient:
             stderr_text = "\n".join(stderr_tail).strip()
             if proc.poll() is not None and stderr_text:
                 raise RuntimeError(f"Copilot ACP process exited early: {stderr_text}")
-            raise TimeoutError(f"Timed out waiting for Copilot ACP response to {method}.")
+            raise TimeoutError(
+                f"Timed out waiting for Copilot ACP response to {method}."
+            )
 
         try:
             _request(
@@ -527,13 +504,16 @@ class CopilotACPClient:
                     },
                 },
             )
-            session = _request(
-                "session/new",
-                {
-                    "cwd": self._acp_cwd,
-                    "mcpServers": [],
-                },
-            ) or {}
+            session = (
+                _request(
+                    "session/new",
+                    {
+                        "cwd": self._acp_cwd,
+                        "mcpServers": [],
+                    },
+                )
+                or {}
+            )
             session_id = str(session.get("sessionId") or "").strip()
             if not session_id:
                 raise RuntimeError("Copilot ACP did not return a sessionId.")
@@ -581,7 +561,11 @@ class CopilotACPClient:
                 chunk_text = str(content.get("text") or "")
             if kind == "agent_message_chunk" and chunk_text and text_parts is not None:
                 text_parts.append(chunk_text)
-            elif kind == "agent_thought_chunk" and chunk_text and reasoning_parts is not None:
+            elif (
+                kind == "agent_thought_chunk"
+                and chunk_text
+                and reasoning_parts is not None
+            ):
                 reasoning_parts.append(chunk_text)
             return True
 
@@ -605,7 +589,9 @@ class CopilotACPClient:
                 if isinstance(line, int) and line > 1:
                     lines = content.splitlines(keepends=True)
                     start = line - 1
-                    end = start + limit if isinstance(limit, int) and limit > 0 else None
+                    end = (
+                        start + limit if isinstance(limit, int) and limit > 0 else None
+                    )
                     content = "".join(lines[start:end])
                 if content:
                     content = redact_sensitive_text(content)
@@ -644,6 +630,3 @@ class CopilotACPClient:
         process.stdin.write(json.dumps(response) + "\n")
         process.stdin.flush()
         return True
-=======
-__all__ = ["CopilotACPClient"]
->>>>>>> 0e257391 (feat: add provider modules + wire transport single-path)

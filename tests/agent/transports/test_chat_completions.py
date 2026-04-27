@@ -142,13 +142,17 @@ class TestChatCompletionsBuildKwargs:
         assert kw["max_tokens"] == 2048
 
     def test_nvidia_default_max_tokens(self, transport):
+        """NVIDIA max_tokens=16384 is now set via ProviderProfile, not legacy flag."""
+        from providers import get_provider_profile
+
+        profile = get_provider_profile("nvidia")
         msgs = [{"role": "user", "content": "Hi"}]
         kw = transport.build_kwargs(
-            model="glm-4.7", messages=msgs,
-            is_nvidia_nim=True,
+            model="nvidia/llama-3.1-405b-instruct",
+            messages=msgs,
             max_tokens_param_fn=lambda n: {"max_tokens": n},
+            provider_profile=profile,
         )
-        # NVIDIA default: 16384
         assert kw["max_tokens"] == 16384
 
     def test_qwen_default_max_tokens(self, transport):
