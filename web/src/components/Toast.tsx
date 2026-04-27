@@ -6,6 +6,9 @@ export function Toast({ toast }: { toast: { message: string; type: "success" | "
   const [current, setCurrent] = useState(toast);
 
   useEffect(() => {
+    // Sync external toast prop into local state; needed so `current` can
+    // persist through the 200ms fade-out animation after `toast` becomes null.
+    /* eslint-disable react-hooks/set-state-in-effect */
     if (toast) {
       setCurrent(toast);
       setVisible(true);
@@ -14,6 +17,7 @@ export function Toast({ toast }: { toast: { message: string; type: "success" | "
       const timer = setTimeout(() => setCurrent(null), 200);
       return () => clearTimeout(timer);
     }
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [toast]);
 
   if (!current) return null;

@@ -455,6 +455,8 @@ export default function AnalyticsPage() {
   }, [days, loading, load, setAfterTitle, setEnd, t.common.refresh]);
 
   useEffect(() => {
+    // Initial fetch on mount; load() uses setState internally.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [load]);
 
