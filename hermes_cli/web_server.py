@@ -595,6 +595,15 @@ async def get_status():
     except Exception:
         pass
 
+    # Hostname for multi-machine workflows (personal vs work laptop, etc.).
+    # Prefer the short hostname (e.g. "mpetters-mbp") over the FQDN.
+    try:
+        import socket as _socket
+        _full = _socket.gethostname() or ""
+        hostname_short = _full.split(".", 1)[0] or _full
+    except Exception:
+        hostname_short = ""
+
     return {
         "version": __version__,
         "release_date": __release_date__,
@@ -611,6 +620,7 @@ async def get_status():
         "gateway_exit_reason": gateway_exit_reason,
         "gateway_updated_at": gateway_updated_at,
         "active_sessions": active_sessions,
+        "hostname": hostname_short,
     }
 
 
