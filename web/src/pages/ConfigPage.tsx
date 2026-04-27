@@ -180,6 +180,8 @@ export default function ConfigPage() {
   // Set active category when categories load
   useEffect(() => {
     if (categoryOrder.length > 0 && !activeCategory) {
+      // Default-selection sync: pick first category once they load.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setActiveCategory(categoryOrder[0]);
     }
   }, [categoryOrder, activeCategory]);
@@ -187,6 +189,8 @@ export default function ConfigPage() {
   // Load YAML when switching to YAML mode
   useEffect(() => {
     if (yamlMode) {
+      // Triggers async fetch + loading-state lifecycle when YAML mode enters.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setYamlLoading(true);
       api
         .getConfigRaw()
@@ -194,9 +198,10 @@ export default function ConfigPage() {
         .catch(() => showToast(t.config.failedToLoadRaw, "error"))
         .finally(() => setYamlLoading(false));
     }
-  }, [yamlMode]);
+  }, [yamlMode, showToast, t.config.failedToLoadRaw]);
 
   /* ---- Categories ---- */
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- React Compiler can't preserve this useMemo; manual memo is intentional
   const categories = useMemo(() => {
     if (!schema) return [];
     const allCats = [
