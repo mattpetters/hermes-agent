@@ -2170,6 +2170,58 @@ class SessionDB:
             self._remove_session_files(sessions_dir, sid)
         return count
 
+    def prune_empty_sessions(
+        self,
+        sessions_dir: Optional[Path] = None,
+        min_age_seconds: int = 60,
+    ) -> int:
+        """Delete sessions that have zero recorded messages.
+
+        Each chat-page mount in the dashboard creates a session row before
+        the user sends anything. If they navigate away without typing the
+        row sticks around forever, polluting the sessions list. This
+        cleans those up.
+
+        Deletes any session where ``message_count = 0`` AND it's older
+        than ``min_age_seconds``. The ``ended_at`` column would be the
+        ideal "is this session over" signal, but PTY children that exit
+        ungracefully (the common case for dashboard mounts) never get a
+        chance to write it. Age alone is the practical guard — at 60s we
+        give a fresh row plenty of time to receive its first message
+        before we'd consider it abandoned.
+        """
+        cutoff = time.time() - max(0, int(min_age_seconds))
+        removed_ids: list[str] = []
+
+        def _do(conn):
+            cursor = conn.execute(
+                """SELECT id FROM sessions
+                   WHERE message_count = 0
+                     AND started_at < ?""",
+                (cutoff,),
+            )
+            session_ids = [row["id"] for row in cursor.fetchall()]
+            if not session_ids:
+                return 0
+
+            placeholders = ",".join("?" * len(session_ids))
+            # Orphan child rows so we can safely delete the parents.
+            conn.execute(
+                f"UPDATE sessions SET parent_session_id = NULL "
+                f"WHERE parent_session_id IN ({placeholders})",
+                session_ids,
+            )
+            for sid in session_ids:
+                conn.execute("DELETE FROM messages WHERE session_id = ?", (sid,))
+                conn.execute("DELETE FROM sessions WHERE id = ?", (sid,))
+                removed_ids.append(sid)
+            return len(session_ids)
+
+        count = self._execute_write(_do)
+        for sid in removed_ids:
+            self._remove_session_files(sessions_dir, sid)
+        return count
+
     # ── Meta key/value (for scheduler bookkeeping) ──
 
     def get_meta(self, key: str) -> Optional[str]:
