@@ -4871,6 +4871,10 @@ class HermesCLI:
         """Handle /resume <session_id_or_title> — switch to a previous session mid-conversation."""
         parts = cmd_original.split(None, 1)
         target = parts[1].strip() if len(parts) > 1 else ""
+        # Strip surrounding quotes — the completer wraps spaced titles in
+        # double quotes so /resume "My Title" parses cleanly.
+        if len(target) >= 2 and target[0] == target[-1] and target[0] in ('"', "'"):
+            target = target[1:-1].strip()
 
         if not target:
             _cprint("  Usage: /resume <session_id_or_title>")
@@ -6335,6 +6339,8 @@ class HermesCLI:
                 _cprint(f"  No agent running; queued as next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
         elif canonical == "skin":
             self._handle_skin_command(cmd_original)
+        elif canonical == "reload-theme":
+            self._handle_reload_theme_command(cmd_original)
         elif canonical == "voice":
             self._handle_voice_command(cmd_original)
         elif canonical == "busy":
@@ -6914,6 +6920,46 @@ class HermesCLI:
             _cprint(f"  Runtime footer: {state}")
         else:
             _cprint("  Failed to save runtime_footer setting to config.yaml")
+
+    def _handle_reload_theme_command(self, cmd: str = ""):
+        """Re-read the active skin's YAML from disk and re-apply it live.
+
+        Useful when iterating on a skin file in ~/.hermes/skins/ — avoids
+        having to drop the session to pick up edits.
+
+        Flags:
+            --banner   Also re-print the startup banner with the new colors.
+        """
+        try:
+            from hermes_cli.skin_engine import set_active_skin, get_active_skin_name
+        except ImportError:
+            print("Skin engine not available.")
+            return
+
+        flags = (cmd or "").strip().split()[1:]
+        reprint_banner = any(f in ("--banner", "-b") for f in flags)
+
+        name = get_active_skin_name()
+        try:
+            set_active_skin(name)         # always re-reads YAML
+            _ACCENT.reset()
+            _DIM.reset()
+        except Exception as e:
+            print(f"  Failed to reload skin '{name}': {e}")
+            return
+
+        print(f"  Reloaded skin: {name}")
+        if self._apply_tui_skin_style():
+            print("  Prompt + TUI colors updated.")
+
+        if reprint_banner:
+            try:
+                self.show_banner()
+                print("  Banner re-rendered.")
+            except Exception as e:
+                print(f"  Banner re-render failed: {e}")
+        else:
+            print("  (Tip: /reload-theme --banner to also re-render the banner.)")
 
     def _toggle_verbose(self):
         """Cycle tool progress mode: off → new → all → verbose → off."""
@@ -10937,7 +10983,15 @@ class HermesCLI:
                                 + (f"\n{_remainder}" if _remainder else "")
                             )
 
-                    if not _file_drop and isinstance(user_input, str) and _looks_like_slash_command(user_input):
+                    _bare_exit = (
+                        isinstance(user_input, str)
+                        and user_input.strip().lower() in {"exit", "quit"}
+                    )
+                    if _bare_exit or (
+                        not _file_drop
+                        and isinstance(user_input, str)
+                        and _looks_like_slash_command(user_input)
+                    ):
                         _cprint(f"\n⚙️  {user_input}")
                         if not self.process_command(user_input):
                             self._should_exit = True
