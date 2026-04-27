@@ -1011,11 +1011,33 @@ def skill_view(
             )
 
         # Security: warn if skill is loaded from outside trusted directories
-        # (local skills dir + configured external_dirs are all trusted)
+        # (local skills dir + configured external_dirs are all trusted).
+        # We also trust the resolved target of any symlinked subdirectory
+        # under SKILLS_DIR — this enables stow/dotfiles-managed skills
+        # without spurious warnings.
         _outside_skills_dir = True
         _trusted_dirs = [SKILLS_DIR.resolve()]
         try:
             _trusted_dirs.extend(d.resolve() for d in all_dirs[1:])
+        except Exception:
+            pass
+        # Walk SKILLS_DIR looking for symlinked subdirectories and trust
+        # their resolved targets too. Limited to one level of children +
+        # grandchildren (skill category dirs) to keep the scan cheap.
+        try:
+            for _child in SKILLS_DIR.iterdir():
+                if _child.is_symlink():
+                    try:
+                        _trusted_dirs.append(_child.resolve())
+                    except Exception:
+                        pass
+                elif _child.is_dir():
+                    for _grand in _child.iterdir():
+                        if _grand.is_symlink():
+                            try:
+                                _trusted_dirs.append(_grand.resolve())
+                            except Exception:
+                                pass
         except Exception:
             pass
         for _td in _trusted_dirs:
