@@ -354,6 +354,7 @@ export interface StatusResponse {
   gateway_state: string | null;
   gateway_updated_at: string | null;
   hermes_home: string;
+  hostname: string;
   latest_config_version: number;
   release_date: string;
   version: string;

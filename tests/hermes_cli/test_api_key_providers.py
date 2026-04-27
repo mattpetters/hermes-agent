@@ -315,6 +315,13 @@ class TestResolveProvider:
 
     def test_auto_does_not_select_copilot_from_github_token(self, monkeypatch):
         monkeypatch.setenv("GITHUB_TOKEN", "gh-test-token")
+        # Mock out AWS credential detection so this test doesn't pass/fail
+        # based on whether the dev machine happens to have ~/.aws/credentials.
+        try:
+            import agent.bedrock_adapter as bedrock_adapter
+            monkeypatch.setattr(bedrock_adapter, "has_aws_credentials", lambda: False)
+        except ImportError:
+            pass
         with pytest.raises(AuthError, match="No inference provider configured"):
             resolve_provider("auto")
 
