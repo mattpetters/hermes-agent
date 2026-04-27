@@ -8214,7 +8214,14 @@ def cmd_dashboard(args):
     # Phone-connect mode is the default; --localhost flips back to loopback-only.
     host = "127.0.0.1" if getattr(args, "localhost", False) else args.host
 
-    embedded_chat = args.tui or os.environ.get("HERMES_DASHBOARD_TUI") == "1"
+    # Embedded Chat tab defaults to ON. Opt out with `--no-tui` or
+    # HERMES_DASHBOARD_TUI=0 / false / off / no.
+    env_tui = os.environ.get("HERMES_DASHBOARD_TUI")
+    if env_tui is not None and env_tui.strip().lower() in {"0", "false", "off", "no"}:
+        env_disable = True
+    else:
+        env_disable = False
+    embedded_chat = bool(getattr(args, "tui", True)) and not env_disable
     start_server(
         host=host,
         port=args.port,
@@ -10747,11 +10754,19 @@ Examples:
     )
     dashboard_parser.add_argument(
         "--tui",
+        dest="tui",
         action="store_true",
+        default=True,
         help=(
             "Expose the in-browser Chat tab (embedded `hermes --tui` via PTY/WebSocket). "
-            "Alternatively set HERMES_DASHBOARD_TUI=1."
+            "ON by default. Set HERMES_DASHBOARD_TUI=0 to disable."
         ),
+    )
+    dashboard_parser.add_argument(
+        "--no-tui",
+        dest="tui",
+        action="store_false",
+        help="Disable the in-browser Chat tab (default is enabled).",
     )
     dashboard_parser.set_defaults(func=cmd_dashboard)
 

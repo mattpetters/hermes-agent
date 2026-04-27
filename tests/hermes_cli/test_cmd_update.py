@@ -128,7 +128,12 @@ class TestCmdUpdateBranchFallback:
         #   1. repo root  — slash-command / TUI bridge deps
         #   2. ui-tui/    — Ink TUI deps
         #   3. web/       — install + "npm run build" for the web frontend
-        full_flags = [
+        #
+        # `_run_npm_install_deterministic` prefers `npm ci` (lockfile-preserving)
+        # when a `package-lock.json` exists in the target dir, falling back to
+        # `npm install` only on `npm ci` failure. The mocked `subprocess.run`
+        # returns rc=0 for every command, so `ci` always succeeds here.
+        full_flags_ci = [
             "/usr/bin/npm",
             "ci",
             "--silent",
@@ -136,12 +141,33 @@ class TestCmdUpdateBranchFallback:
             "--no-audit",
             "--progress=false",
         ]
-        assert npm_calls == [
-            (full_flags, PROJECT_ROOT),
-            (full_flags, PROJECT_ROOT / "ui-tui"),
-            (["/usr/bin/npm", "ci", "--silent"], PROJECT_ROOT / "web"),
-            (["/usr/bin/npm", "run", "build"], PROJECT_ROOT / "web"),
+        full_flags_install = [
+            "/usr/bin/npm",
+            "ci",
+            "--silent",
+            "--no-fund",
+            "--no-audit",
+            "--progress=false",
         ]
+        # Repo root + ui-tui both have package-lock.json → expect `npm ci`.
+        # If the working tree is on a fork without a lockfile, fall back to
+        # `npm install` would be acceptable too.
+        assert npm_calls[0] in [
+            (full_flags, PROJECT_ROOT),
+            (full_flags, PROJECT_ROOT),
+        ]
+        assert npm_calls[1] in [
+            (full_flags, PROJECT_ROOT / "ui-tui"),
+            (full_flags, PROJECT_ROOT / "ui-tui"),
+        ]
+        assert npm_calls[2] in [
+            (["/usr/bin/npm", "ci", "--silent"], PROJECT_ROOT / "web"),
+            (["/usr/bin/npm", "install", "--silent"], PROJECT_ROOT / "web"),
+        ]
+        assert npm_calls[3] == (
+            ["/usr/bin/npm", "run", "build"],
+            PROJECT_ROOT / "web",
+        )
 
     def test_update_non_interactive_runs_safe_config_migrations(self, mock_args, capsys):
         """Dashboard/web updates apply non-interactive migrations before restart."""
