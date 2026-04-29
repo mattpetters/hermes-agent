@@ -65,8 +65,6 @@ export const api = {
   getStatus: () => fetchJSON<StatusResponse>("/api/status"),
   getSessions: (limit = 20, offset = 0) =>
     fetchJSON<PaginatedSessions>(`/api/sessions?limit=${limit}&offset=${offset}`),
-  getSession: (id: string) =>
-    fetchJSON<SessionInfo>(`/api/sessions/${encodeURIComponent(id)}`),
   getSessionMessages: (id: string) =>
     fetchJSON<SessionMessagesResponse>(`/api/sessions/${encodeURIComponent(id)}/messages`),
   getSessionLatestDescendant: (id: string) =>
@@ -378,7 +376,6 @@ export interface StatusResponse {
   gateway_state: string | null;
   gateway_updated_at: string | null;
   hermes_home: string;
-  hostname: string;
   latest_config_version: number;
   release_date: string;
   version: string;
