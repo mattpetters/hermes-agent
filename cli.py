@@ -7722,12 +7722,17 @@ class HermesCLI:
         Flags:
             --check   Only print fork status; don't fetch, rebase, or push.
 
-        Refuses to run if the working tree is dirty or HEAD isn't on 'main'.
+        Fetches both origin (with --prune) and upstream before doing anything.
+        If HEAD is on a feature branch, automatically switches to main for the
+        sync and returns to the original branch afterwards (rebased onto the
+        new main).  After syncing main, cleans up stale local branches whose
+        remote tracking branch is gone and whose commits are all on main.
+
+        Refuses to run if the working tree is dirty.
         On success, invalidates the banner's fork-state cache so the next
         banner render reflects the new state.
         """
         import subprocess
-        from pathlib import Path
 
         try:
             from hermes_cli.banner import (
@@ -7753,7 +7758,21 @@ class HermesCLI:
                 timeout=timeout, cwd=str(repo_dir),
             )
 
-        # Show current fork state up front
+        # ── Step 0: Fetch everything first ──────────────────────────────
+        # Always fetch both remotes so status counts are accurate and we
+        # can detect gone branches.  --prune on origin removes stale
+        # remote-tracking refs for branches deleted via merged PRs.
+        print("  Fetching origin (--prune) and upstream...")
+        fe_origin = _run(["git", "fetch", "origin", "--prune"], timeout=60)
+        if fe_origin.returncode != 0:
+            print(f"  git fetch origin failed: {(fe_origin.stderr or '').strip()}")
+            return
+        fe_upstream = _run(["git", "fetch", "upstream", "main"], timeout=60)
+        if fe_upstream.returncode != 0:
+            print(f"  git fetch upstream failed: {(fe_upstream.stderr or '').strip()}")
+            return
+
+        # Show current fork state (uses freshly-fetched refs)
         state = get_fork_state()
         if not state:
             print("  No upstream remote configured — not a fork.")
@@ -7765,41 +7784,41 @@ class HermesCLI:
         ahead = int(state.get("ahead") or 0)
         print(f"  Fork: {owner}")
         print(f"  Upstream: {upstream}")
-        print(f"  Status: {behind} behind, {ahead} ahead (vs cached upstream/main)")
+        print(f"  Status: {behind} behind, {ahead} ahead (vs upstream/main)")
 
         if check_only:
-            print("  --check: skipping fetch/rebase/push.")
+            self._sync_fork_show_branches(_run)
+            print("  --check: skipping rebase/push.")
             return
 
-        # Pre-flight: clean tree
+        # ── Pre-flight: clean tree ──────────────────────────────────────
         st = _run(["git", "status", "--porcelain"], timeout=10)
         if st.returncode != 0:
             print(f"  git status failed: {(st.stderr or '').strip()}")
             return
         if (st.stdout or "").strip():
-            print("  Working tree is dirty. Commit or stash before /sync-fork:")
+            print("  Working tree is dirty. Commit your WIP to a branch before /sync-fork:")
             for line in (st.stdout or "").splitlines()[:10]:
                 print(f"    {line}")
             return
 
-        # Pre-flight: on main
+        # ── Detect original branch, switch to main if needed ────────────
         br = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
-        branch = (br.stdout or "").strip()
-        if br.returncode != 0 or not branch:
+        original_branch = (br.stdout or "").strip()
+        if br.returncode != 0 or not original_branch:
             print("  Failed to read current branch.")
             return
-        if branch != "main":
-            print(f"  HEAD is on '{branch}', not 'main'. /sync-fork only runs on main.")
-            return
 
-        # Fetch upstream
-        print("  Fetching upstream/main...")
-        fe = _run(["git", "fetch", "upstream", "main"], timeout=60)
-        if fe.returncode != 0:
-            print(f"  git fetch failed: {(fe.stderr or '').strip()}")
-            return
+        switched_from = None
+        if original_branch != "main":
+            print(f"  Currently on '{original_branch}' — switching to main for sync...")
+            co = _run(["git", "checkout", "main"], timeout=10)
+            if co.returncode != 0:
+                print(f"  Failed to checkout main: {(co.stderr or '').strip()}")
+                return
+            switched_from = original_branch
 
-        # Re-check counts after fetch
+        # ── Re-check counts against main HEAD after checkout ────────────
         rl = _run(
             ["git", "rev-list", "--left-right", "--count", "HEAD...upstream/main"],
             timeout=10,
@@ -7809,33 +7828,55 @@ class HermesCLI:
             if len(parts) == 2:
                 ahead = int(parts[0] or "0")
                 behind = int(parts[1] or "0")
+
         if behind == 0:
             print("  Already up to date with upstream/main.")
-            # Still invalidate cache so banner reflects fresh fetch
-            _banner_mod._fork_state_cache = None
-            return
+        else:
+            # ── Rebase main onto upstream/main ──────────────────────────
+            print(f"  Rebasing {ahead} local commit(s) onto upstream/main ({behind} behind)...")
+            rb = _run(["git", "rebase", "upstream/main"], timeout=120)
+            if rb.returncode != 0:
+                print("  Rebase hit conflicts. Resolve manually, then:")
+                print("    cd ~/.hermes/hermes-agent")
+                print("    git rebase --continue   # or: git rebase --abort")
+                print(f"    git push --force-with-lease origin main")
+                print()
+                print((rb.stdout or "").rstrip())
+                print((rb.stderr or "").rstrip())
+                return
 
-        print(f"  Rebasing {ahead} local commit(s) onto upstream/main ({behind} behind)...")
-        rb = _run(["git", "rebase", "upstream/main"], timeout=120)
-        if rb.returncode != 0:
-            print("  Rebase hit conflicts. Resolve manually, then:")
-            print("    cd ~/.hermes/hermes-agent")
-            print("    git rebase --continue   # or: git rebase --abort")
-            print(f"    git push --force-with-lease origin main")
-            print()
-            print((rb.stdout or "").rstrip())
-            print((rb.stderr or "").rstrip())
-            return
+            # ── Force-push main ─────────────────────────────────────────
+            print("  Force-pushing to origin/main (--force-with-lease)...")
+            ps = _run(
+                ["git", "push", "--force-with-lease", "origin", "main"],
+                timeout=60,
+            )
+            if ps.returncode != 0:
+                print(f"  Push failed: {(ps.stderr or '').strip()}")
+                print("  Rebase succeeded locally; resolve and re-push manually.")
+                return
 
-        print("  Force-pushing to origin/main (--force-with-lease)...")
-        ps = _run(
-            ["git", "push", "--force-with-lease", "origin", "main"],
-            timeout=60,
-        )
-        if ps.returncode != 0:
-            print(f"  Push failed: {(ps.stderr or '').strip()}")
-            print("  Rebase succeeded locally; resolve and re-push manually.")
-            return
+            print(f"  Synced {behind} commit(s) from upstream; {ahead} local commit(s) replayed on top.")
+
+        # ── Clean up stale branches ─────────────────────────────────────
+        self._sync_fork_cleanup_branches(_run)
+
+        # ── Return to original branch + rebase onto new main ────────────
+        if switched_from:
+            # Check if branch still exists (might have been cleaned up)
+            br_check = _run(["git", "rev-parse", "--verify", switched_from], timeout=5)
+            if br_check.returncode == 0:
+                print(f"  Returning to '{switched_from}' and rebasing onto main...")
+                _run(["git", "checkout", switched_from], timeout=10)
+                rb2 = _run(["git", "rebase", "main"], timeout=120)
+                if rb2.returncode != 0:
+                    print(f"  Rebase of '{switched_from}' onto main hit conflicts.")
+                    print("  Resolve manually: git rebase --continue / --abort")
+                    print((rb2.stderr or "").rstrip())
+                else:
+                    print(f"  '{switched_from}' rebased onto main.")
+            else:
+                print(f"  Original branch '{switched_from}' was cleaned up; staying on main.")
 
         # Invalidate fork-state cache so banner reflects new state next render
         try:
@@ -7843,8 +7884,84 @@ class HermesCLI:
         except Exception:
             pass
 
-        print(f"  Done. Synced {behind} commit(s) from upstream; {ahead} local commit(s) replayed on top.")
-        print("  Tip: restart Hermes (or run /reload-theme --banner) to refresh the indicator.")
+        print("  Done. Tip: restart Hermes (or /reload-theme --banner) to refresh the indicator.")
+
+    def _sync_fork_show_branches(self, _run):
+        """Show local branch status summary for --check mode."""
+        br_list = _run(["git", "branch", "-vv"], timeout=10)
+        if br_list.returncode != 0:
+            return
+        lines = (br_list.stdout or "").strip().splitlines()
+        stale = []
+        feature = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("* ") or stripped.startswith("main "):
+                continue
+            if "[gone]" in stripped:
+                stale.append(stripped.split()[0])
+            else:
+                feature.append(stripped.split()[0])
+        if stale:
+            print(f"  Stale branches (remote gone): {', '.join(stale)}")
+        if feature:
+            print(f"  Feature branches: {', '.join(feature)}")
+
+    def _sync_fork_cleanup_branches(self, _run):
+        """Delete local branches whose remote is gone and all commits are on main."""
+        br_list = _run(["git", "branch", "-vv"], timeout=10)
+        if br_list.returncode != 0:
+            return
+        lines = (br_list.stdout or "").strip().splitlines()
+        cleaned = []
+        kept = []
+        for line in lines:
+            stripped = line.lstrip("* ").strip()
+            if not stripped or stripped.startswith("main "):
+                continue
+            parts = stripped.split()
+            branch_name = parts[0]
+            is_gone = "[gone]" in stripped
+
+            if not is_gone:
+                continue
+
+            # Check if all commits are already on main (merged via squash/PR)
+            diff = _run(
+                ["git", "log", f"main..{branch_name}", "--oneline", "--cherry-pick", "--right-only"],
+                timeout=10,
+            )
+            unique_commits = [l for l in (diff.stdout or "").strip().splitlines() if l.strip()]
+
+            # Also do a subject-match check for squash merges
+            if unique_commits:
+                still_unique = []
+                main_subjects = _run(
+                    ["git", "log", "main", "--format=%s", "-200"],
+                    timeout=10,
+                )
+                main_subj_set = set((main_subjects.stdout or "").strip().splitlines())
+                for commit_line in unique_commits:
+                    # Format: "abc1234 commit subject here"
+                    subj = commit_line.split(" ", 1)[1] if " " in commit_line else commit_line
+                    base_subj = subj.split(" (#")[0] if " (#" in subj else subj
+                    on_main = subj in main_subj_set or any(base_subj in ms for ms in main_subj_set)
+                    if not on_main:
+                        still_unique.append(commit_line)
+                unique_commits = still_unique
+
+            if unique_commits:
+                kept.append((branch_name, len(unique_commits)))
+            else:
+                # Safe to delete — all commits are on main
+                _run(["git", "branch", "-D", branch_name], timeout=10)
+                cleaned.append(branch_name)
+
+        if cleaned:
+            print(f"  Cleaned up stale branches: {', '.join(cleaned)}")
+        if kept:
+            for name, n in kept:
+                print(f"  Kept '{name}' — {n} unique commit(s) not yet on main")
 
     def _toggle_verbose(self):
         """Cycle tool progress mode: off → new → all → verbose → off."""
