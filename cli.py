@@ -3260,7 +3260,7 @@ class HermesCLI:
                     frags.extend([
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", duration_label),
-                    ]
+                    ])
                     # Session cost (per-session $ amount)
                     cost = self._status_bar_cost_cache
                     if cost:
