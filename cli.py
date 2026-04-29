@@ -6037,22 +6037,21 @@ class HermesCLI:
                 print(f"(._.) Unknown personality: {personality_name}")
                 print(f"  Available: none, {', '.join(self.personalities.keys())}")
         else:
-            # Show available personalities
-            print()
-            print("+" + "-" * 50 + "+")
-            print("|" + " " * 12 + "(^o^)/ Personalities" + " " * 15 + "|")
-            print("+" + "-" * 50 + "+")
-            print()
-            print(f"  {'none':<12} - (no personality overlay)")
-            for name, prompt in self.personalities.items():
-                if isinstance(prompt, dict):
-                    preview = prompt.get("description") or prompt.get("system_prompt", "")[:50]
+            # Pick a random personality
+            import random
+            if self.personalities:
+                personality_name = random.choice(list(self.personalities.keys()))
+                self.system_prompt = self._resolve_personality_prompt(self.personalities[personality_name])
+                self.agent = None  # Force re-init
+                if save_config_value("agent.system_prompt", self.system_prompt):
+                    print(f"(^o^)/ Random personality: '{personality_name}' (saved to config)")
                 else:
-                    preview = str(prompt)[:50]
-                print(f"  {name:<12} - {preview}")
-            print()
-            print("  Usage: /personality <name>")
-            print()
+                    print(f"(^o^)/ Random personality: '{personality_name}' (session only)")
+                print(f"  \"{self.system_prompt[:60]}{'...' if len(self.system_prompt) > 60 else ''}\"")
+                print()
+                print(f"  Tip: /personality <name> to pick one, /personality none to clear")
+            else:
+                print("(._.) No personalities configured.")
     
     def _handle_cron_command(self, cmd: str):
         """Handle the /cron command to manage scheduled tasks."""
