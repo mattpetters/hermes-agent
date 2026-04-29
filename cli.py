@@ -2210,6 +2210,10 @@ class HermesCLI:
         # Status bar visibility (toggled via /statusbar)
         self._status_bar_visible = True
 
+        # Credits/account-usage cache for status bar (lazy refresh)
+        self._status_bar_credits_cache: Optional[tuple[float, str]] = None  # (timestamp, text)
+        self._status_bar_cost_cache: Optional[str] = None  # cached "$X.XX" string
+
         # Background task tracking: {task_id: threading.Thread}
         self._background_tasks: Dict[str, threading.Thread] = {}
         self._background_task_counter = 0
@@ -2341,6 +2345,55 @@ class HermesCLI:
         emoji = "⏱" if live else "⏲"
         return f"{emoji} {time_str}"
 
+    def _refresh_credits_cache(self) -> str:
+        '''Lazy-fetch OpenRouter credits for the status bar. Cache valid 2 min.'''
+        now = time.monotonic()
+        if self._status_bar_credits_cache is not None:
+            ts, text = self._status_bar_credits_cache
+            if now - ts < 120:
+                return text
+        text = ''
+        try:
+            # Read OpenRouter key directly from credential pool (bypass
+            # exhaustion cooldown — credits API is a lightweight GET).
+            from agent.credential_pool import load_pool
+            pool = load_pool('openrouter')
+            api_key = ''
+            base_url = ''
+            if pool and pool._entries:
+                entry = pool._entries[0]
+                api_key = getattr(entry, 'access_token', '') or ''
+                base_url = getattr(entry, 'base_url', '') or ''
+            if api_key:
+                import httpx
+                headers = {'Authorization': f'Bearer {api_key}', 'Accept': 'application/json'}
+                credits_url = f'{base_url.rstrip("/")}/credits' if base_url else 'https://openrouter.ai/api/v1/credits'
+                resp = httpx.get(credits_url, headers=headers, timeout=10.0)
+                resp.raise_for_status()
+                credits = (resp.json() or {}).get('data') or {}
+                total = float(credits.get('total_credits') or 0.0)
+                used = float(credits.get('total_usage') or 0.0)
+                remaining = max(0.0, total - used)
+                text = f'OR ${remaining:.2f}'
+            elif pool and pool.has_credentials():
+                # Pool exists but all entries exhausted — still try the env var
+                import os
+                api_key = os.environ.get('OPENROUTER_API_KEY', '').strip()
+                if api_key:
+                    import httpx
+                    headers = {'Authorization': f'Bearer {api_key}', 'Accept': 'application/json'}
+                    resp = httpx.get('https://openrouter.ai/api/v1/credits', headers=headers, timeout=10.0)
+                    resp.raise_for_status()
+                    credits = (resp.json() or {}).get('data') or {}
+                    total = float(credits.get('total_credits') or 0.0)
+                    used = float(credits.get('total_usage') or 0.0)
+                    remaining = max(0.0, total - used)
+                    text = f'OR ${remaining:.2f}'
+        except Exception:
+            pass
+        self._status_bar_credits_cache = (now, text)
+        return text
+
     def _get_status_bar_snapshot(self) -> Dict[str, Any]:
         # Prefer the agent's model name — it updates on fallback.
         # self.model reflects the originally configured model and never
@@ -2390,7 +2443,22 @@ class HermesCLI:
         snapshot["session_total_tokens"] = getattr(agent, "session_total_tokens", 0) or 0
         snapshot["session_api_calls"] = getattr(agent, "session_api_calls", 0) or 0
 
-        compressor = getattr(agent, "context_compressor", None)
+        # Session estimated cost (per-session $ amount)
+        cost_usd = getattr(agent, 'session_estimated_cost_usd', None)
+        if cost_usd is not None and cost_usd > 0:
+            snapshot['estimated_cost_usd'] = float(cost_usd)
+            cost_status = getattr(agent, 'session_cost_status', 'unknown')
+            prefix = '~' if cost_status == 'estimated' else ''
+            self._status_bar_cost_cache = f'{prefix}${cost_usd:.2f}'
+        else:
+            snapshot['estimated_cost_usd'] = 0.0
+            self._status_bar_cost_cache = None
+
+        # Provider credits (e.g. OpenRouter) — cached, refreshed at most every 2 min
+        credits_text = self._refresh_credits_cache()
+        snapshot['credits_remaining'] = credits_text
+
+        compressor = getattr(agent, 'context_compressor', None)
         if compressor:
             context_tokens = getattr(compressor, "last_prompt_tokens", 0) or 0
             context_length = getattr(compressor, "context_length", 0) or 0
@@ -2554,6 +2622,14 @@ class HermesCLI:
 
             parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
             parts.append(duration_label)
+            # Session cost
+            cost = self._status_bar_cost_cache
+            if cost:
+                parts.append(cost)
+            # Provider credits
+            credits = snapshot.get('credits_remaining', '')
+            if credits:
+                parts.append(credits)
             prompt_elapsed = snapshot.get("prompt_elapsed")
             if prompt_elapsed:
                 parts.append(prompt_elapsed)
@@ -2622,7 +2698,17 @@ class HermesCLI:
                         (bar_style, percent_label),
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", duration_label),
-                    ])
+                    ]
+                    # Session cost (per-session $ amount)
+                    cost = self._status_bar_cost_cache
+                    if cost:
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append(("class:status-bar-dim", cost))
+                    # Provider credits (e.g. OpenRouter balance)
+                    credits = snapshot.get("credits_remaining", "")
+                    if credits:
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append(("class:status-bar-dim", credits))
                     # Position 7: per-prompt elapsed timer (live or frozen)
                     prompt_elapsed = snapshot.get("prompt_elapsed")
                     if prompt_elapsed:
