@@ -2778,6 +2778,36 @@ class HermesCLI:
         filled = round((safe_percent / 100) * width)
         return f"[{('█' * filled) + ('░' * max(0, width - filled))}]"
 
+    _status_bar_git_branch_cache: Optional[str] = None
+    _status_bar_git_branch_ts: float = 0.0
+
+    def _get_status_bar_git_branch(self) -> Optional[str]:
+        """Return the current git branch for ~/.hermes/hermes-agent, cached 30s."""
+        import time
+        now = time.monotonic()
+        if self._status_bar_git_branch_cache is not None and (now - self._status_bar_git_branch_ts) < 30:
+            return self._status_bar_git_branch_cache
+        try:
+            from hermes_cli.banner import _resolve_repo_dir
+            import subprocess
+            repo_dir = _resolve_repo_dir()
+            if repo_dir is None:
+                self._status_bar_git_branch_cache = ""
+                self._status_bar_git_branch_ts = now
+                return ""
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=3, cwd=str(repo_dir),
+            )
+            branch = (result.stdout or "").strip() if result.returncode == 0 else ""
+            self._status_bar_git_branch_cache = branch
+            self._status_bar_git_branch_ts = now
+            return branch
+        except Exception:
+            self._status_bar_git_branch_cache = ""
+            self._status_bar_git_branch_ts = now
+            return ""
+
     @staticmethod
     def _format_prompt_elapsed(prompt_start_time: Optional[float], prompt_duration: float, live: bool = False) -> str:
         """Format per-prompt elapsed time for the status bar.
@@ -3134,6 +3164,13 @@ class HermesCLI:
                     frags = [
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
+                    ]
+                    # Git branch indicator (only when not on main)
+                    git_branch = self._get_status_bar_git_branch()
+                    if git_branch and git_branch != "main":
+                        frags.append(("class:status-bar-dim", " "))
+                        frags.append(("class:status-bar-warn", f"⎇ {git_branch}"))
+                    frags.extend([
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", context_label),
                         ("class:status-bar-dim", " │ "),
