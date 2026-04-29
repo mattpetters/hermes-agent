@@ -6508,6 +6508,8 @@ class HermesCLI:
                 self._reload_skills()
         elif canonical == "browser":
             self._handle_browser_command(cmd_original)
+        elif canonical == "tmux":
+            self._handle_tmux_command(cmd_original)
         elif canonical == "plugins":
             try:
                 from hermes_cli.plugins import get_plugin_manager
@@ -6859,6 +6861,223 @@ class HermesCLI:
         Returns True if a launch command was executed (doesn't guarantee success).
         """
         return try_launch_chrome_debug(port, system)
+
+    # -----------------------------------------------------------------
+    # /tmux — spawn Hermes agents in tmux panes, windows, or sessions
+    # -----------------------------------------------------------------
+
+    def _handle_tmux_command(self, cmd: str):
+        """Handle /tmux pane|window|session|status|kill — manage tmux-based agent panes.
+
+        Subcommands:
+            pane [prompt]     — split a new pane to the right with an interactive Hermes REPL,
+                                optionally pre-loaded with a prompt
+            window [prompt]   — open a new tmux window with an interactive Hermes REPL
+            session [name]    — create/attach a persistent named tmux session with Hermes
+            status            — list all Hermes agent panes/windows spawned by /tmux
+            kill [target]     — kill a spawned agent pane/window by pane-id or index
+        """
+        import shutil
+
+        parts = cmd.strip().split(None, 2)  # ["/tmux", "subcommand", "rest..."]
+        sub = parts[1].lower().strip() if len(parts) > 1 else ""
+        rest = parts[2].strip() if len(parts) > 2 else ""
+
+        if not sub:
+            _cprint("  Usage: /tmux <pane|window|session|status|kill> [prompt|name|target]")
+            _cprint("")
+            _cprint("  Subcommands:")
+            _cprint("    pane [prompt]    — split a Hermes REPL pane to the right")
+            _cprint("    window [prompt]  — open a Hermes REPL in a new tmux window")
+            _cprint("    session [name]   — persistent named session with Hermes REPL")
+            _cprint("    status           — list spawned agent panes/windows")
+            _cprint("    kill [target]    — kill a spawned pane by id (from /tmux status)")
+            return
+
+        # --- Pre-flight: is tmux available and are we inside it? ---
+        tmux_bin = shutil.which("tmux")
+        if not tmux_bin:
+            _cprint("  ✗ tmux is not installed or not in PATH.")
+            return
+        if not os.environ.get("TMUX"):
+            _cprint("  ✗ Not inside a tmux session. Start tmux first, then retry.")
+            return
+
+        hermes_bin = shutil.which("hermes")
+        if not hermes_bin:
+            _cprint("  ✗ hermes CLI not found in PATH.")
+            return
+
+        if sub == "pane":
+            self._tmux_spawn(tmux_bin, hermes_bin, "pane", rest)
+        elif sub == "window":
+            self._tmux_spawn(tmux_bin, hermes_bin, "window", rest)
+        elif sub == "session":
+            self._tmux_spawn_session(tmux_bin, hermes_bin, rest)
+        elif sub == "status":
+            self._tmux_status(tmux_bin)
+        elif sub == "kill":
+            self._tmux_kill(tmux_bin, rest)
+        else:
+            _cprint(f"  Unknown subcommand: {sub}")
+            _cprint("  Available: pane, window, session, status, kill")
+
+    def _tmux_spawn(self, tmux_bin: str, hermes_bin: str, mode: str, prompt: str):
+        """Spawn a Hermes REPL in a new tmux pane or window."""
+        import subprocess
+
+        # Build the hermes command
+        hermes_cmd = f"{hermes_bin} chat"
+        if prompt:
+            # Escape single quotes for shell embedding
+            safe_prompt = prompt.replace("'", "'\\''")
+            hermes_cmd += f" -q '{safe_prompt}'"
+
+        try:
+            if mode == "pane":
+                result = subprocess.run(
+                    [tmux_bin, "split-window", "-h", "-P", "-F", "#{pane_id}", hermes_cmd],
+                    capture_output=True, text=True, timeout=5,
+                )
+            else:  # window
+                result = subprocess.run(
+                    [tmux_bin, "new-window", "-P", "-F", "#{pane_id}", hermes_cmd],
+                    capture_output=True, text=True, timeout=5,
+                )
+
+            pane_id = result.stdout.strip()
+            if result.returncode == 0 and pane_id:
+                # Track spawned panes
+                if not hasattr(self, "_tmux_spawned"):
+                    self._tmux_spawned = []
+                self._tmux_spawned.append({
+                    "pane_id": pane_id,
+                    "mode": mode,
+                    "prompt": prompt[:80] if prompt else "(interactive)",
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                })
+                label = "pane" if mode == "pane" else "window"
+                _cprint(f"  ✓ Hermes {label} spawned: {pane_id}")
+                if prompt:
+                    _cprint(f"    prompt: {prompt[:80]}{'…' if len(prompt) > 80 else ''}")
+            else:
+                _cprint(f"  ✗ Failed to spawn {mode}: {result.stderr.strip() or 'unknown error'}")
+        except subprocess.TimeoutExpired:
+            _cprint(f"  ✗ tmux command timed out")
+        except Exception as e:
+            _cprint(f"  ✗ Error: {e}")
+
+    def _tmux_spawn_session(self, tmux_bin: str, hermes_bin: str, name: str):
+        """Create or attach a persistent named tmux session with a Hermes REPL."""
+        import subprocess
+
+        session_name = name or f"hermes-{datetime.now().strftime('%H%M%S')}"
+
+        # Check if session already exists
+        check = subprocess.run(
+            [tmux_bin, "has-session", "-t", session_name],
+            capture_output=True, text=True,
+        )
+
+        if check.returncode == 0:
+            # Session exists — switch to it
+            subprocess.run(
+                [tmux_bin, "switch-client", "-t", session_name],
+                capture_output=True, text=True,
+            )
+            _cprint(f"  ✓ Switched to existing session: {session_name}")
+        else:
+            # Create new session (detached), then switch
+            result = subprocess.run(
+                [tmux_bin, "new-session", "-d", "-s", session_name, f"{hermes_bin} chat"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                subprocess.run(
+                    [tmux_bin, "switch-client", "-t", session_name],
+                    capture_output=True, text=True,
+                )
+                if not hasattr(self, "_tmux_spawned"):
+                    self._tmux_spawned = []
+                self._tmux_spawned.append({
+                    "pane_id": session_name,
+                    "mode": "session",
+                    "prompt": "(interactive)",
+                    "time": datetime.now().strftime("%H:%M:%S"),
+                })
+                _cprint(f"  ✓ Hermes session created: {session_name}")
+            else:
+                _cprint(f"  ✗ Failed: {result.stderr.strip() or 'unknown error'}")
+
+    def _tmux_status(self, tmux_bin: str):
+        """List all spawned agent panes/windows and their status."""
+        import subprocess
+
+        if not hasattr(self, "_tmux_spawned") or not self._tmux_spawned:
+            _cprint("  No agent panes/windows spawned this session.")
+            _cprint("  Use /tmux pane or /tmux window to spawn one.")
+            return
+
+        # Check which are still alive
+        alive_check = subprocess.run(
+            [tmux_bin, "list-panes", "-a", "-F", "#{pane_id}"],
+            capture_output=True, text=True,
+        )
+        live_panes = set(alive_check.stdout.strip().splitlines()) if alive_check.returncode == 0 else set()
+
+        # Also check sessions
+        sess_check = subprocess.run(
+            [tmux_bin, "list-sessions", "-F", "#{session_name}"],
+            capture_output=True, text=True,
+        )
+        live_sessions = set(sess_check.stdout.strip().splitlines()) if sess_check.returncode == 0 else set()
+
+        _cprint("  Spawned agents:")
+        _cprint("")
+        for i, entry in enumerate(self._tmux_spawned):
+            pid = entry["pane_id"]
+            is_session = entry["mode"] == "session"
+            alive = pid in (live_sessions if is_session else live_panes)
+            status = "●" if alive else "○"
+            _cprint(f"  {status} [{i}] {entry['mode']:8s} {pid:12s} {entry['time']}  {entry['prompt']}")
+        _cprint("")
+        _cprint("  ● = alive  ○ = exited    Kill with: /tmux kill <index or pane-id>")
+
+    def _tmux_kill(self, tmux_bin: str, target: str):
+        """Kill a spawned agent pane/window by index or pane-id."""
+        import subprocess
+
+        if not target:
+            _cprint("  Usage: /tmux kill <index or pane-id>")
+            _cprint("  Use /tmux status to see spawned agents.")
+            return
+
+        # Resolve index to pane_id
+        pane_id = target
+        if target.isdigit() and hasattr(self, "_tmux_spawned"):
+            idx = int(target)
+            if 0 <= idx < len(self._tmux_spawned):
+                entry = self._tmux_spawned[idx]
+                pane_id = entry["pane_id"]
+            else:
+                _cprint(f"  ✗ Index {idx} out of range. Use /tmux status to see list.")
+                return
+
+        # Try killing as pane first, then as session
+        result = subprocess.run(
+            [tmux_bin, "kill-pane", "-t", pane_id],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            result = subprocess.run(
+                [tmux_bin, "kill-session", "-t", pane_id],
+                capture_output=True, text=True,
+            )
+
+        if result.returncode == 0:
+            _cprint(f"  ✓ Killed: {pane_id}")
+        else:
+            _cprint(f"  ✗ Could not kill {pane_id}: {result.stderr.strip() or 'not found'}")
 
     def _handle_browser_command(self, cmd: str):
         """Handle /browser connect|disconnect|status — manage live Chrome CDP connection."""
