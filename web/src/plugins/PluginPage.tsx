@@ -26,11 +26,6 @@ export function PluginPage({ name }: { name: string }) {
   );
 
   if (Component) {
-    // Plugin components are dynamically registered at runtime by external
-    // bundles (see registry.register()). The reference is stable once the
-    // bundle has called register(), so this is not a per-render new
-    // component despite what the static-components rule infers.
-    // eslint-disable-next-line react-hooks/static-components
     return <Component />;
   }
 
