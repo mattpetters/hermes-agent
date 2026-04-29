@@ -55,7 +55,6 @@ import { SidebarFooter } from "@/components/SidebarFooter";
 import { SidebarStatusStrip } from "@/components/SidebarStatusStrip";
 import { PageHeaderProvider } from "@/contexts/PageHeaderProvider";
 import { useSystemActions } from "@/contexts/useSystemActions";
-import { useSidebarStatus } from "@/hooks/useSidebarStatus";
 import type { SystemAction } from "@/contexts/system-actions-context";
 import ConfigPage from "@/pages/ConfigPage";
 import DocsPage from "@/pages/DocsPage";
@@ -404,8 +403,6 @@ export default function App() {
         >
           {t.app.brand}
         </Typography>
-
-        <MobileHostnameBadge />
       </header>
 
       {mobileOpen && (
@@ -739,28 +736,4 @@ interface SystemActionItem {
   label: string;
   runningLabel: string;
   spin: boolean;
-}
-
-/**
- * Mobile-header hostname pill — shows which machine the dashboard is
- * running on so users with personal + work laptops can tell tabs apart.
- * On desktop the same info appears in SidebarStatusStrip.
- */
-function MobileHostnameBadge() {
-  const status = useSidebarStatus();
-  const hostname = status?.hostname;
-  if (!hostname) return null;
-  return (
-    <span
-      title={`host: ${hostname}`}
-      className={cn(
-        "ml-auto truncate max-w-[40vw]",
-        "font-mondwest text-[0.6rem] tracking-[0.12em]",
-        "text-midground/70",
-      )}
-      style={{ mixBlendMode: "plus-lighter" }}
-    >
-      {hostname}
-    </span>
-  );
 }

@@ -56,9 +56,7 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   const { t } = useI18n();
 
   const onErrorRef = useRef(onError);
-  useEffect(() => {
-    onErrorRef.current = onError;
-  }, [onError]);
+  onErrorRef.current = onError;
 
   const refresh = useCallback(() => {
     setLoading(true);
@@ -70,8 +68,6 @@ export function OAuthProvidersCard({ onError, onSuccess }: Props) {
   }, []);
 
   useEffect(() => {
-    // Initial fetch on mount; refresh() uses setState internally.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     refresh();
   }, [refresh]);
 
