@@ -10,13 +10,64 @@ reasoning configuration, temperature handling, and extra_body assembly.
 """
 
 import copy
-from typing import Any, Dict, List, Optional
+import logging
+from typing import Any, Dict, List, Optional, Set
 
 from agent.lmstudio_reasoning import resolve_lmstudio_effort
 from agent.moonshot_schema import is_moonshot_model, sanitize_moonshot_tools
 from agent.prompt_builder import DEVELOPER_ROLE_MODELS
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
+
+logger = logging.getLogger(__name__)
+
+# OpenAI's Chat Completions endpoint enforces a hard 128-function limit on the
+# tools array for GPT-5.4+ models.  See:
+# https://platform.openai.com/docs/guides/function-calling#tool-search
+_RESPONSES_API_MAX_TOOLS = 128
+
+# Priority-ordered core tools that are least likely to be dropped when
+# truncating.  Order matches the canonical _HERMES_CORE_TOOLS list.
+_CORE_TOOL_NAMES: Set[str] = {
+    "web_search",
+    "web_extract",
+    "terminal",
+    "process",
+    "read_file",
+    "write_file",
+    "patch",
+    "search_files",
+    "vision_analyze",
+    "image_generate",
+    "skills_list",
+    "skill_view",
+    "skill_manage",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_scroll",
+    "browser_back",
+    "browser_press",
+    "browser_get_images",
+    "browser_vision",
+    "browser_console",
+    "browser_cdp",
+    "browser_dialog",
+    "text_to_speech",
+    "todo",
+    "memory",
+    "session_search",
+    "clarify",
+    "execute_code",
+    "delegate_task",
+    "cronjob",
+    "send_message",
+    "ha_list_entities",
+    "ha_get_state",
+    "ha_list_services",
+    "ha_call_service",
+}
 
 
 def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> dict | None:
@@ -249,6 +300,33 @@ class ChatCompletionsTransport(ProviderTransport):
             # etc.) compatible, in addition to direct moonshot.ai endpoints.
             if is_moonshot_model(model):
                 tools = sanitize_moonshot_tools(tools)
+
+            # OpenAI GPT-5.4+ enforces a hard 128-function limit on the tools
+            # array for both Chat Completions and Responses API.  Truncate
+            # with priority ordering (core tools first) so the most-likely-to-be-used
+            # functions are preserved.
+            if len(tools) > _RESPONSES_API_MAX_TOOLS:
+                def _tool_priority(t: Dict[str, Any]) -> int:
+                    fn = t.get("function", {}) if isinstance(t, dict) else {}
+                    name = str(fn.get("name", "")).strip().lower()
+                    return 0 if name in _CORE_TOOL_NAMES else 1
+
+                sorted_tools = sorted(tools, key=_tool_priority)
+                dropped = [
+                    str(t.get("function", {}).get("name", "?")) if isinstance(t, dict) else "?"
+                    for t in sorted_tools[_RESPONSES_API_MAX_TOOLS:]
+                ]
+                logger.warning(
+                    "Chat Completions tool limit exceeded: %d tools discovered, "
+                    "truncating to %d.  Dropped tools: %s.  "
+                    "Consider disabling unused toolsets in config.yaml (agent.disabled_toolsets) "
+                    "or using enabled_toolsets for this model.",
+                    len(tools),
+                    _RESPONSES_API_MAX_TOOLS,
+                    ", ".join(dropped[:20]) + (" ..." if len(dropped) > 20 else ""),
+                )
+                tools = sorted_tools[:_RESPONSES_API_MAX_TOOLS]
+
             api_kwargs["tools"] = tools
 
         # max_tokens resolution — priority: ephemeral > user > provider default

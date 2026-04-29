@@ -8298,18 +8298,6 @@ class GatewayRunner:
         if not personalities:
             return f"No personalities configured in `{display_hermes_home()}/config.yaml`"
 
-        if not args:
-            lines = ["🎭 **Available Personalities**\n"]
-            lines.append("• `none` — (no personality overlay)")
-            for name, prompt in personalities.items():
-                if isinstance(prompt, dict):
-                    preview = prompt.get("description") or prompt.get("system_prompt", "")[:50]
-                else:
-                    preview = prompt[:50] + "..." if len(prompt) > 50 else prompt
-                lines.append(f"• `{name}` — {preview}")
-            lines.append("\nUsage: `/personality <name>`")
-            return "\n".join(lines)
-
         def _resolve_prompt(value):
             if isinstance(value, dict):
                 parts = [value.get("system_prompt", "")]
@@ -8319,6 +8307,23 @@ class GatewayRunner:
                     parts.append(f'Style: {value["style"]}')
                 return "\n".join(p for p in parts if p)
             return str(value)
+
+        if not args:
+            # Pick a random personality
+            import random
+            if not personalities:
+                return "No personalities configured."
+            name = random.choice(list(personalities.keys()))
+            new_prompt = _resolve_prompt(personalities[name])
+            try:
+                if "agent" not in config or not isinstance(config.get("agent"), dict):
+                    config["agent"] = {}
+                config["agent"]["system_prompt"] = new_prompt
+                atomic_yaml_write(config_path, config)
+            except Exception as e:
+                return f"⚠️ Failed to save personality change: {e}"
+            self._ephemeral_system_prompt = new_prompt
+            return f"🎲 Random personality: **{name}**\n_(takes effect on next message)_\n\nTip: `/personality <name>` to pick one, `/personality none` to clear"
 
         if args in ("none", "default", "neutral"):
             try:

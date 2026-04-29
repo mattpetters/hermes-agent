@@ -5,10 +5,59 @@ This transport owns format conversion and normalization — NOT client lifecycle
 streaming, or the _run_codex_stream() call path.
 """
 
-from typing import Any, Dict, List, Optional
+import logging
+from typing import Any, Dict, List, Optional, Set
 
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse, ToolCall
+
+logger = logging.getLogger(__name__)
+
+# OpenAI Responses API enforces a hard 128-function limit on the tools array.
+_RESPONSES_API_MAX_TOOLS = 128
+
+# Priority-ordered core tools that are least likely to be dropped when
+# truncating.  Order matches the canonical _HERMES_CORE_TOOLS list.
+_CORE_TOOL_NAMES: Set[str] = {
+    "web_search",
+    "web_extract",
+    "terminal",
+    "process",
+    "read_file",
+    "write_file",
+    "patch",
+    "search_files",
+    "vision_analyze",
+    "image_generate",
+    "skills_list",
+    "skill_view",
+    "skill_manage",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_scroll",
+    "browser_back",
+    "browser_press",
+    "browser_get_images",
+    "browser_vision",
+    "browser_console",
+    "browser_cdp",
+    "browser_dialog",
+    "text_to_speech",
+    "todo",
+    "memory",
+    "session_search",
+    "clarify",
+    "execute_code",
+    "delegate_task",
+    "cronjob",
+    "send_message",
+    "ha_list_entities",
+    "ha_get_state",
+    "ha_list_services",
+    "ha_call_service",
+}
 
 
 class ResponsesApiTransport(ProviderTransport):
@@ -89,11 +138,33 @@ class ResponsesApiTransport(ProviderTransport):
         _effort_clamp = {"minimal": "low"}
         reasoning_effort = _effort_clamp.get(reasoning_effort, reasoning_effort)
 
+        raw_tools = _responses_tools(tools)
+        if raw_tools and len(raw_tools) > _RESPONSES_API_MAX_TOOLS:
+            # Priority sort: core tools first, then everything else in
+            # original order so the model still sees the most-likely-to-be-used
+            # functions even when the full set exceeds OpenAI's limit.
+            def _tool_priority(t: Dict[str, Any]) -> int:
+                name = str(t.get("name", "")).strip().lower()
+                return 0 if name in _CORE_TOOL_NAMES else 1
+
+            sorted_tools = sorted(raw_tools, key=_tool_priority)
+            dropped = [str(t.get("name", "?")) for t in sorted_tools[_RESPONSES_API_MAX_TOOLS:]]
+            logger.warning(
+                "Responses API tool limit exceeded: %d tools discovered, "
+                "truncating to %d.  Dropped tools: %s.  "
+                "Consider disabling unused toolsets in config.yaml (agent.disabled_toolsets) "
+                "or using enabled_toolsets for this model.",
+                len(raw_tools),
+                _RESPONSES_API_MAX_TOOLS,
+                ", ".join(dropped[:20]) + (" ..." if len(dropped) > 20 else ""),
+            )
+            raw_tools = sorted_tools[:_RESPONSES_API_MAX_TOOLS]
+
         kwargs = {
             "model": model,
             "instructions": instructions,
             "input": _chat_messages_to_responses_input(payload_messages),
-            "tools": _responses_tools(tools),
+            "tools": raw_tools,
             "tool_choice": "auto",
             "parallel_tool_calls": True,
             "store": False,
