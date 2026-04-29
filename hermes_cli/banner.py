@@ -446,6 +446,59 @@ def _parse_owner_repo(remote_url: str) -> Optional[str]:
     return s if "/" in s else None
 
 
+def _get_branch_info(repo_dir: Optional[Path] = None) -> Optional[dict]:
+    """Return current branch, worktree status, and local branch count.
+
+    Returns a dict with:
+      - branch: current branch name (or "HEAD" if detached)
+      - is_worktree: True if the checkout is a linked worktree
+      - worktree_path: short path if worktree, else ""
+      - local_branch_count: number of local branches
+    """
+    repo_dir = repo_dir or _resolve_repo_dir()
+    if repo_dir is None:
+        return None
+    try:
+        # Current branch
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=3, cwd=str(repo_dir),
+        )
+        branch = (result.stdout or "").strip() if result.returncode == 0 else "???"
+
+        # Is this a linked worktree?
+        wt = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=3, cwd=str(repo_dir),
+        )
+        git_dir = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            capture_output=True, text=True, timeout=3, cwd=str(repo_dir),
+        )
+        common = (wt.stdout or "").strip()
+        actual = (git_dir.stdout or "").strip()
+        is_worktree = common != actual and common != "" and actual != ""
+        worktree_path = str(repo_dir) if is_worktree else ""
+
+        # Local branch count
+        br_list = subprocess.run(
+            ["git", "branch", "--list"],
+            capture_output=True, text=True, timeout=3, cwd=str(repo_dir),
+        )
+        local_branch_count = len([
+            l for l in (br_list.stdout or "").strip().splitlines() if l.strip()
+        ]) if br_list.returncode == 0 else 0
+
+        return {
+            "branch": branch,
+            "is_worktree": is_worktree,
+            "worktree_path": worktree_path,
+            "local_branch_count": local_branch_count,
+        }
+    except Exception:
+        return None
+
+
 # Cache the upstream-fetch state across the process lifetime so the banner
 # count stays fresh without blocking startup or every command.
 _fork_state_cache: Optional[dict] = None
@@ -843,6 +896,8 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
 
     # Fork indicator — shown only when origin != upstream (i.e., on a fork).
     # Red escalation at >=50 commits behind so drift stays visible.
+    # Also shows current branch + worktree status so the user always knows
+    # where HEAD is before starting work.
     try:
         fork_state = get_fork_state()
         if fork_state:
@@ -863,6 +918,25 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
                 parts.append(f"[dim {dim}](+{ahead} local)[/]")
             right_lines.append("")
             right_lines.append(f"[bold {accent}]Fork:[/] " + " ".join(parts))
+
+            # Branch / worktree line — always show so the user knows where HEAD is
+            branch_info = _get_branch_info()
+            if branch_info:
+                branch_name = branch_info.get("branch", "???")
+                is_worktree = branch_info.get("is_worktree", False)
+                branch_count = branch_info.get("local_branch_count", 0)
+                if branch_name == "main":
+                    branch_label = f"[dim {dim}]on[/] [{text}]main[/]"
+                else:
+                    branch_label = f"[dim {dim}]on[/] [bold yellow]{branch_name}[/]"
+                extras = []
+                if is_worktree:
+                    worktree_path = branch_info.get("worktree_path", "")
+                    extras.append(f"worktree: {worktree_path}" if worktree_path else "worktree")
+                if branch_count > 1:
+                    extras.append(f"{branch_count} local branches")
+                extra_str = f" [dim {dim}]· {' · '.join(extras)}[/]" if extras else ""
+                right_lines.append(f"       {branch_label}{extra_str}")
     except Exception:
         pass  # Never break the banner over the fork indicator
 
