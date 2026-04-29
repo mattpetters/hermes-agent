@@ -112,7 +112,7 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("gquota", "Show Google Gemini Code Assist quota usage", "Info",
                cli_only=True),
 
-    CommandDef("personality", "Set a predefined personality", "Configuration",
+    CommandDef("personality", "Random personality (or /personality <name>)", "Configuration",
                args_hint="[name]"),
     CommandDef("statusbar", "Toggle the context/model status bar", "Configuration",
                cli_only=True, aliases=("sb",)),
