@@ -62,9 +62,9 @@ logger = logging.getLogger(__name__)
 # Keep this list aligned with current top-tier OpenRouter frontier options.
 REFERENCE_MODELS = [
     "anthropic/claude-opus-4.6",
-    "google/gemini-2.5-pro",
+    "google/gemini-3-pro",
     "openai/gpt-5.4-pro",
-    "deepseek/deepseek-v3.2",
+    "moonshotai/kimi-k2.6",
 ]
 
 # Aggregator model - synthesizes reference responses into final output.

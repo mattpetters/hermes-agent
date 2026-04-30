@@ -409,7 +409,7 @@ def _continuous_on_silence() -> None:
         _debug("_continuous_on_silence: waiting for TTS to finish")
         _tts_playing.wait(timeout=60)
         import time as _time
-        _time.sleep(0.3)
+        _time.sleep(0.8)
 
         # User may have stopped the loop during the wait.
         with _continuous_lock:
@@ -534,7 +534,7 @@ def speak_text(text: str) -> None:
         # Small delay lets the OS flush speaker output and afplay fully
         # release the audio device before sounddevice re-opens the input.
         if paused_recording:
-            time.sleep(0.3)
+            time.sleep(0.8)
             with _continuous_lock:
                 if _continuous_active and _continuous_recorder is not None:
                     try:

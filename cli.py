@@ -7776,11 +7776,27 @@ class HermesCLI:
         if st.returncode != 0:
             print(f"  git status failed: {(st.stderr or '').strip()}")
             return
+        wip_branch_created = None
         if (st.stdout or "").strip():
-            print("  Working tree is dirty. Commit your WIP to a branch before /sync-fork:")
+            print("  Working tree is dirty:")
             for line in (st.stdout or "").splitlines()[:10]:
                 print(f"    {line}")
-            return
+            answer = self._prompt_text_input("  Commit changes to a WIP branch? [y/N] ")
+            if not answer or answer.lower() not in ("y", "yes"):
+                print("  Aborted. Commit or stash manually before /sync-fork.")
+                return
+            # Create a timestamped WIP branch
+            import datetime
+            ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            wip_name = f"wip/{ts}"
+            _run(["git", "checkout", "-b", wip_name], timeout=10)
+            _run(["git", "add", "-A"], timeout=10)
+            cm = _run(["git", "commit", "--no-gpg-sign", "-m", f"WIP: auto-save before sync-fork ({ts})"], timeout=15)
+            if cm.returncode != 0:
+                print(f"  Commit failed: {(cm.stderr or '').strip()}")
+                return
+            wip_branch_created = wip_name
+            print(f"  Created WIP branch '{wip_name}' with dirty changes.")
 
         # ── Detect original branch, switch to main if needed ────────────
         br = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
@@ -7797,6 +7813,9 @@ class HermesCLI:
                 print(f"  Failed to checkout main: {(co.stderr or '').strip()}")
                 return
             switched_from = original_branch
+
+        # ── Merge WIP branches into main ──────────────────────────────
+        self._sync_fork_merge_wip_branches(_run)
 
         # ── Re-check counts against main HEAD after checkout ────────────
         rl = _run(
@@ -7942,6 +7961,51 @@ class HermesCLI:
         if kept:
             for name, n in kept:
                 print(f"  Kept '{name}' — {n} unique commit(s) not yet on main")
+
+    def _sync_fork_merge_wip_branches(self, _run):
+        """Ask to merge local WIP / feature branches into main before rebase."""
+        br_list = _run(["git", "branch"], timeout=10)
+        if br_list.returncode != 0:
+            return
+        branches = []
+        for line in (br_list.stdout or "").strip().splitlines():
+            name = line.strip().lstrip("* ").strip()
+            if name and name != "main":
+                branches.append(name)
+        if not branches:
+            return
+        print(f"  Local branches: {', '.join(branches)}")
+        answer = self._prompt_text_input("  Merge all WIP branches into main? [y/N] ")
+        if not answer or answer.lower() not in ("y", "yes"):
+            return
+        # Make sure we're on main
+        _run(["git", "checkout", "main"], timeout=10)
+        merged = []
+        failed = []
+        for branch in branches:
+            mg = _run(["git", "merge", "--squash", branch], timeout=30)
+            if mg.returncode != 0:
+                print(f"  Merge --squash of '{branch}' failed: {(mg.stderr or '').strip()}")
+                _run(["git", "reset", "--hard"], timeout=10)
+                failed.append(branch)
+                continue
+            cm = _run(["git", "commit", "--no-gpg-sign", "--no-edit", "-m",
+                       f"Merge WIP branch '{branch}' into main"], timeout=15)
+            if cm.returncode != 0:
+                # Possibly nothing to commit (already merged)
+                _run(["git", "reset", "--hard"], timeout=10)
+                print(f"  Nothing new to merge from '{branch}', skipping.")
+                continue
+            _run(["git", "branch", "-D", branch], timeout=10)
+            merged.append(branch)
+        if merged:
+            print(f"  Merged and deleted: {', '.join(merged)}")
+            # Re-push main with the merged WIP
+            ps = _run(["git", "push", "--force-with-lease", "origin", "main"], timeout=60)
+            if ps.returncode != 0:
+                print(f"  Push after WIP merge failed: {(ps.stderr or '').strip()}")
+        if failed:
+            print(f"  Failed to merge: {', '.join(failed)} (left intact)")
 
     def _toggle_verbose(self):
         """Cycle tool progress mode: off → new → all → verbose → off."""
@@ -12216,7 +12280,7 @@ class HermesCLI:
                                 try:
                                     if self._voice_tts:
                                         self._voice_tts_done.wait(timeout=60)
-                                        time.sleep(0.3)
+                                        time.sleep(0.8)
                                     self._voice_start_recording()
                                     app.invalidate()
                                 except Exception as e:
