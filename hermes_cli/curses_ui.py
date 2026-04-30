@@ -4,10 +4,21 @@ Used by `hermes tools` and `hermes skills` for interactive checklists.
 Provides a curses multi-select with keyboard navigation, plus a
 text-based numbered fallback for terminals without curses support.
 """
+import logging
+import re
 import sys
 from typing import Callable, List, Optional, Set
 
 from hermes_cli.colors import Colors, color
+
+logger = logging.getLogger(__name__)
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text for safe curses rendering."""
+    return _ANSI_RE.sub("", text)
 
 
 def flush_stdin() -> None:
@@ -314,21 +325,36 @@ def curses_single_select(
     default_index: int = 0,
     *,
     cancel_label: str = "Cancel",
+    details: Optional[List[Optional[str]]] = None,
 ) -> int | None:
     """Curses single-select menu. Returns selected index or None on cancel.
 
     Works inside prompt_toolkit because curses.wrapper() restores the terminal
     safely, unlike simple_term_menu which conflicts with /dev/tty.
+
+    Args:
+        details: Optional list parallel to *items*. When provided, pressing
+            Tab on an item toggles display of its detail text (multi-line).
+            Use ``None`` entries for items that have no expandable detail.
     """
     if not sys.stdin.isatty():
         return None
+
+    has_details = details is not None and any(d for d in details)
 
     try:
         import curses
         result_holder: list = [None]
 
-        all_items = list(items) + [cancel_label]
+        all_items = [_strip_ansi(s) for s in items] + [cancel_label]
         cancel_idx = len(items)
+
+        # Pad details to match all_items length (items + Cancel)
+        all_details: List[Optional[str]] = []
+        if details:
+            all_details = list(details) + [None]
+        else:
+            all_details = [None] * len(all_items)
 
         def _draw(stdscr):
             curses.curs_set(0)
@@ -337,8 +363,10 @@ def curses_single_select(
                 curses.use_default_colors()
                 curses.init_pair(1, curses.COLOR_GREEN, -1)
                 curses.init_pair(2, curses.COLOR_YELLOW, -1)
+                curses.init_pair(3, curses.COLOR_CYAN, -1)
             cursor = min(default_index, len(all_items) - 1)
             scroll_offset = 0
+            expanded: set = set()
 
             while True:
                 stdscr.clear()
@@ -349,37 +377,66 @@ def curses_single_select(
                     if curses.has_colors():
                         hattr |= curses.color_pair(2)
                     stdscr.addnstr(0, 0, title, max_x - 1, hattr)
-                    stdscr.addnstr(
-                        1, 0,
-                        "  ↑↓ navigate  ENTER confirm  ESC/q cancel",
-                        max_x - 1, curses.A_DIM,
-                    )
+                    hint = "  ↑↓ navigate  ENTER confirm  ESC/q cancel"
+                    if has_details:
+                        hint = "  ↑↓ navigate  TAB expand  ENTER confirm  ESC/q cancel"
+                    stdscr.addnstr(1, 0, hint, max_x - 1, curses.A_DIM)
                 except curses.error:
                     pass
 
-                visible_rows = max_y - 3
-                if cursor < scroll_offset:
-                    scroll_offset = cursor
-                elif cursor >= scroll_offset + visible_rows:
-                    scroll_offset = cursor - visible_rows + 1
+                # Build display rows: each item is 1 row, but expanded items
+                # add detail lines below them.
+                display_rows: list = []  # (item_idx, line_text, is_detail)
+                for i in range(len(all_items)):
+                    display_rows.append((i, all_items[i], False))
+                    if i in expanded and all_details[i]:
+                        for dline in _strip_ansi(all_details[i]).splitlines():
+                            display_rows.append((i, dline, True))
 
-                for draw_i, i in enumerate(
-                    range(scroll_offset, min(len(all_items), scroll_offset + visible_rows))
-                ):
-                    y = draw_i + 3
+                # Find the display row index where the cursor item starts
+                cursor_display_row = 0
+                for dr_idx, (item_idx, _, _) in enumerate(display_rows):
+                    if item_idx == cursor:
+                        cursor_display_row = dr_idx
+                        break
+
+                visible_rows = max_y - 3
+                if cursor_display_row < scroll_offset:
+                    scroll_offset = cursor_display_row
+                elif cursor_display_row >= scroll_offset + visible_rows:
+                    scroll_offset = cursor_display_row - visible_rows + 1
+
+                for draw_i in range(scroll_offset, min(len(display_rows), scroll_offset + visible_rows)):
+                    y = (draw_i - scroll_offset) + 3
                     if y >= max_y - 1:
                         break
-                    arrow = "→" if i == cursor else " "
-                    line = f" {arrow} {all_items[i]}"
-                    attr = curses.A_NORMAL
-                    if i == cursor:
-                        attr = curses.A_BOLD
+                    item_idx, line_text, is_detail = display_rows[draw_i]
+
+                    if is_detail:
+                        # Render detail lines indented and dimmed
+                        detail_line = f"      {line_text}"
+                        dattr = curses.A_DIM
                         if curses.has_colors():
-                            attr |= curses.color_pair(1)
-                    try:
-                        stdscr.addnstr(y, 0, line, max_x - 1, attr)
-                    except curses.error:
-                        pass
+                            dattr |= curses.color_pair(3)
+                        try:
+                            stdscr.addnstr(y, 0, detail_line, max_x - 1, dattr)
+                        except curses.error:
+                            pass
+                    else:
+                        arrow = "→" if item_idx == cursor else " "
+                        expand_marker = ""
+                        if all_details[item_idx]:
+                            expand_marker = " ▼" if item_idx in expanded else " ▶"
+                        line = f" {arrow} {line_text}{expand_marker}"
+                        attr = curses.A_NORMAL
+                        if item_idx == cursor:
+                            attr = curses.A_BOLD
+                            if curses.has_colors():
+                                attr |= curses.color_pair(1)
+                        try:
+                            stdscr.addnstr(y, 0, line, max_x - 1, attr)
+                        except curses.error:
+                            pass
 
                 stdscr.refresh()
                 key = stdscr.getch()
@@ -388,6 +445,8 @@ def curses_single_select(
                     cursor = (cursor - 1) % len(all_items)
                 elif key in (curses.KEY_DOWN, ord("j")):
                     cursor = (cursor + 1) % len(all_items)
+                elif key == 9 and all_details[cursor]:  # Tab
+                    expanded.symmetric_difference_update({cursor})
                 elif key in (curses.KEY_ENTER, 10, 13):
                     result_holder[0] = cursor
                     return
@@ -401,7 +460,8 @@ def curses_single_select(
             return None
         return result_holder[0]
 
-    except Exception:
+    except Exception as exc:
+        logger.debug("curses_single_select fell back to numbered input: %s", exc)
         all_items = list(items) + [cancel_label]
         cancel_idx = len(items)
         return _numbered_single_fallback(title, all_items, cancel_idx)
