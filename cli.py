@@ -216,6 +216,15 @@ def _assistant_copy_text(content: Any) -> str:
     return _strip_reasoning_tags(_assistant_content_as_text(content))
 
 
+def _extract_fenced_code_blocks(text: str) -> list[dict]:
+    """Extract fenced code blocks from markdown text. Returns list of {lang, code} dicts."""
+    import re
+    blocks = []
+    for m in re.finditer(r"```(\w*)\n(.*?)```", text, re.DOTALL):
+        blocks.append({"lang": m.group(1) or "text", "code": m.group(2)})
+    return blocks
+
+
 # =============================================================================
 # Configuration Loading
 # =============================================================================
@@ -5065,9 +5074,31 @@ class HermesCLI:
             _cprint("  Nothing to copy in that assistant response.")
             return
 
+        blocks = _extract_fenced_code_blocks(text)
+        if blocks:
+            _ansi_re = __import__("re").compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+            def _preview(lang: str, code: str) -> str:
+                first_line = _ansi_re.sub("", code.strip().split("\n")[0])
+                label = f"{lang}: {first_line}"
+                return label[:60] + "…" if len(label) > 60 else label
+
+            items = ["Full response"] + [_preview(b["lang"], b["code"]) for b in blocks]
+            details = [None] + [b["code"].rstrip() for b in blocks]
+            choice = self._run_curses_picker("Copy to clipboard", items, details=details)
+            if choice is None:
+                _cprint("  Cancelled.")
+                return
+            copy_text = text if choice == 0 else blocks[choice - 1]["code"]
+        else:
+            copy_text = text
+
         try:
-            self._write_osc52_clipboard(text)
-            _cprint(f"  Copied assistant response #{idx + 1} to clipboard")
+            self._write_osc52_clipboard(copy_text)
+            if blocks and choice > 0:
+                _cprint(f"  Copied code block #{choice} to clipboard")
+            else:
+                _cprint(f"  Copied assistant response #{idx + 1} to clipboard")
         except Exception as e:
             _cprint(f"  Clipboard copy failed: {e}")
 
@@ -6268,7 +6299,7 @@ class HermesCLI:
         remaining = len(self.conversation_history)
         print(f"  {remaining} message(s) remaining in history.")
     
-    def _run_curses_picker(self, title: str, items: list[str], default_index: int = 0) -> int | None:
+    def _run_curses_picker(self, title: str, items: list[str], default_index: int = 0, **kwargs) -> int | None:
         """Run curses_single_select via run_in_terminal so prompt_toolkit handles terminal ownership cleanly."""
         import threading
         from hermes_cli.curses_ui import curses_single_select
@@ -6276,7 +6307,7 @@ class HermesCLI:
         result = [None]
 
         def _pick():
-            result[0] = curses_single_select(title, items, default_index=default_index)
+            result[0] = curses_single_select(title, items, default_index=default_index, **kwargs)
 
         # run_in_terminal requires an asyncio event loop — only exists in the
         # main prompt_toolkit thread.  If we're in a background thread (e.g.
