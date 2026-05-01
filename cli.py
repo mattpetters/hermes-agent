@@ -1137,6 +1137,40 @@ _BOLD = "\033[1m"
 _RST = "\033[0m"
 _STREAM_PAD = "    "  # 4-space indent for streamed response text (matches Panel padding)
 
+# ---------------------------------------------------------------------------
+# Streaming syntax highlighting via Pygments
+# ---------------------------------------------------------------------------
+# Fenced code blocks (```lang ... ```) are detected line-by-line during
+# streaming.  Lines inside a fence are highlighted with Pygments and emitted
+# with ANSI true-color escapes, giving the user syntax colors even while
+# tokens are still arriving.
+# ---------------------------------------------------------------------------
+
+_CODE_FENCE_RE = re.compile(r"^(`{3,}|~{3,})\s*(\S*)")
+
+
+def _pygments_highlight_line(line: str, lang: str) -> str:
+    """Return *line* with ANSI syntax highlighting for *lang*.
+
+    Falls back to plain text if the language is unknown or Pygments is not
+    importable.  The returned string already contains ANSI escapes and a
+    trailing reset — callers must NOT wrap it in the uniform text color.
+    """
+    try:
+        from pygments import highlight as _pyg_highlight
+        from pygments.lexers import get_lexer_by_name, TextLexer
+        from pygments.formatters import TerminalTrueColorFormatter
+    except ImportError:
+        return line
+    try:
+        lexer = get_lexer_by_name(lang, stripall=False)
+    except Exception:
+        lexer = TextLexer()
+    # highlight() adds a trailing newline — strip it.
+    return _pyg_highlight(
+        line, lexer, TerminalTrueColorFormatter(style="monokai")
+    ).rstrip("\n")
+
 
 def _hex_to_ansi(hex_color: str, *, bold: bool = False) -> str:
     """Convert a hex color like '#268bd2' to a true-color ANSI escape."""
@@ -3235,9 +3269,36 @@ class HermesCLI:
         _tc = getattr(self, "_stream_text_ansi", "")
         while "\n" in self._stream_buf:
             line, self._stream_buf = self._stream_buf.split("\n", 1)
-            if self.final_response_markdown == "strip":
-                line = _strip_markdown_syntax(line)
-            _cprint(f"{_STREAM_PAD}{_tc}{line}{_RST}" if _tc else f"{_STREAM_PAD}{line}")
+
+            # --- Fenced code-block detection & syntax highlighting ---
+            fence_m = _CODE_FENCE_RE.match(line)
+            if fence_m and not self._stream_in_code_block:
+                # Opening fence: start a code block
+                self._stream_in_code_block = True
+                self._stream_code_fence = fence_m.group(1)[0]  # ` or ~
+                self._stream_code_lang = fence_m.group(2) or ""
+                # Emit the fence line dimmed (like a UI delimiter, not code)
+                _dim = "\033[2m"
+                _cprint(f"{_STREAM_PAD}{_dim}{line}{_RST}")
+                continue
+            elif self._stream_in_code_block and fence_m and fence_m.group(1)[0] == self._stream_code_fence:
+                # Closing fence
+                self._stream_in_code_block = False
+                _dim = "\033[2m"
+                _cprint(f"{_STREAM_PAD}{_dim}{line}{_RST}")
+                self._stream_code_lang = ""
+                self._stream_code_fence = ""
+                continue
+
+            if self._stream_in_code_block and self._stream_code_lang:
+                # Inside a fenced block with a known language — highlight
+                highlighted = _pygments_highlight_line(line, self._stream_code_lang)
+                _cprint(f"{_STREAM_PAD}{highlighted}{_RST}")
+            else:
+                # Normal prose or unknown-language code block
+                if self.final_response_markdown == "strip":
+                    line = _strip_markdown_syntax(line)
+                _cprint(f"{_STREAM_PAD}{_tc}{line}{_RST}" if _tc else f"{_STREAM_PAD}{line}")
 
     def _flush_stream(self) -> None:
         """Emit any remaining partial line from the stream buffer and close the box."""
@@ -3254,9 +3315,17 @@ class HermesCLI:
 
         if self._stream_buf:
             _tc = getattr(self, "_stream_text_ansi", "")
-            line = _strip_markdown_syntax(self._stream_buf) if self.final_response_markdown == "strip" else self._stream_buf
-            _cprint(f"{_STREAM_PAD}{_tc}{line}{_RST}" if _tc else f"{_STREAM_PAD}{line}")
+            if self._stream_in_code_block and self._stream_code_lang:
+                highlighted = _pygments_highlight_line(self._stream_buf, self._stream_code_lang)
+                _cprint(f"{_STREAM_PAD}{highlighted}{_RST}")
+            else:
+                line = _strip_markdown_syntax(self._stream_buf) if self.final_response_markdown == "strip" else self._stream_buf
+                _cprint(f"{_STREAM_PAD}{_tc}{line}{_RST}" if _tc else f"{_STREAM_PAD}{line}")
             self._stream_buf = ""
+            # Reset code block state (stream ended, possibly mid-block)
+            self._stream_in_code_block = False
+            self._stream_code_lang = ""
+            self._stream_code_fence = ""
 
         # Close the response box
         if self._stream_box_opened:
@@ -3276,6 +3345,10 @@ class HermesCLI:
         self._reasoning_buf = ""
         self._reasoning_preview_buf = ""
         self._deferred_content = ""
+        # Syntax-highlighting state for fenced code blocks
+        self._stream_in_code_block = False
+        self._stream_code_lang = ""
+        self._stream_code_fence = ""  # the opening fence chars (``` or ~~~)
 
     def _slow_command_status(self, command: str) -> str:
         """Return a user-facing status message for slower slash commands."""
