@@ -135,6 +135,7 @@ class SkinConfig:
     branding: Dict[str, str] = field(default_factory=dict)
     tool_prefix: str = "┊"
     tool_emojis: Dict[str, str] = field(default_factory=dict)  # per-tool emoji overrides
+    code_colors: Dict[str, str] = field(default_factory=dict)  # syntax highlight palette
     banner_logo: str = ""    # Rich-markup ASCII art logo (replaces HERMES_AGENT_LOGO)
     banner_hero: str = ""    # Rich-markup hero art (replaces HERMES_CADUCEUS)
 
@@ -684,6 +685,7 @@ def _build_skin_config(data: Dict[str, Any]) -> SkinConfig:
         branding=branding,
         tool_prefix=data.get("tool_prefix", default.get("tool_prefix", "┊")),
         tool_emojis=data.get("tool_emojis", {}),
+        code_colors=data.get("code_colors", {}),
         banner_logo=data.get("banner_logo", ""),
         banner_hero=data.get("banner_hero", ""),
     )
