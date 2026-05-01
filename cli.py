@@ -1148,13 +1148,106 @@ _STREAM_PAD = "    "  # 4-space indent for streamed response text (matches Panel
 
 _CODE_FENCE_RE = re.compile(r"^(`{3,}|~{3,})\s*(\S*)")
 
+# Cache: (skin_name, code_colors_tuple) -> Pygments Style class
+_skin_pygments_style_cache: dict = {}
+
+
+def _build_skin_pygments_style(code_colors: dict):
+    """Build a Pygments Style subclass from skin code_colors dict.
+
+    Expected keys (all optional, hex strings like '#7E8FAF'):
+        keyword, string, comment, function, number, operator, type,
+        variable, decorator, error, default, namespace, builtin,
+        punctuation
+
+    Returns a Style subclass, or None to signal "use monokai fallback".
+    """
+    if not code_colors:
+        return None
+    try:
+        from pygments.style import Style
+        from pygments.token import (
+            Token, Keyword, Name, Comment, String, Error,
+            Number, Operator, Punctuation, Literal,
+        )
+    except ImportError:
+        return None
+
+    def _hex(key: str) -> str:
+        """Ensure '#' prefix — Pygments styles require '#RRGGBB'."""
+        v = code_colors.get(key, "")
+        if not v:
+            return ""
+        return v if v.startswith("#") else f"#{v}"
+
+    default = _hex("default")
+    styles = {}
+    if default:
+        styles[Token] = default
+    if _hex("comment"):
+        styles[Comment] = "italic " + _hex("comment")
+    if _hex("keyword"):
+        styles[Keyword] = "bold " + _hex("keyword")
+    if _hex("namespace"):
+        styles[Keyword.Namespace] = _hex("namespace")
+    if _hex("string"):
+        styles[String] = _hex("string")
+    if _hex("number"):
+        styles[Number] = _hex("number")
+        styles[Literal] = _hex("number")
+    if _hex("function"):
+        styles[Name.Function] = _hex("function")
+        styles[Name.Class] = _hex("function")
+        styles[Name.Exception] = _hex("function")
+    if _hex("decorator"):
+        styles[Name.Decorator] = _hex("decorator")
+    if _hex("builtin"):
+        styles[Name.Builtin] = _hex("builtin")
+    if _hex("variable"):
+        styles[Name.Variable] = _hex("variable")
+        styles[Name.Attribute] = _hex("variable")
+    if _hex("type"):
+        styles[Keyword.Type] = _hex("type")
+        styles[Name.Constant] = _hex("type")
+    if _hex("operator"):
+        styles[Operator] = _hex("operator")
+    if _hex("punctuation"):
+        styles[Punctuation] = _hex("punctuation")
+    if _hex("error"):
+        styles[Error] = "bold " + _hex("error")
+
+    return type("SkinStyle", (Style,), {"styles": styles})
+
+
+def _get_pygments_style():
+    """Return the Pygments Style class for the active skin (cached)."""
+    global _skin_pygments_style_cache
+    try:
+        from hermes_cli.skin_engine import get_active_skin
+        skin = get_active_skin()
+        cache_key = (skin.name, tuple(sorted(skin.code_colors.items())))
+    except Exception:
+        cache_key = ("__fallback__", ())
+
+    if cache_key in _skin_pygments_style_cache:
+        return _skin_pygments_style_cache[cache_key]
+
+    style = None
+    if cache_key[0] != "__fallback__":
+        style = _build_skin_pygments_style(skin.code_colors)
+    if style is None:
+        style = "monokai"  # string name — TerminalTrueColorFormatter accepts both
+    _skin_pygments_style_cache[cache_key] = style
+    return style
+
 
 def _pygments_highlight_line(line: str, lang: str) -> str:
     """Return *line* with ANSI syntax highlighting for *lang*.
 
-    Falls back to plain text if the language is unknown or Pygments is not
-    importable.  The returned string already contains ANSI escapes and a
-    trailing reset — callers must NOT wrap it in the uniform text color.
+    Uses the active skin's code_colors palette if defined, otherwise
+    falls back to monokai.  The returned string already contains ANSI
+    escapes and a trailing reset — callers must NOT wrap it in the
+    uniform text color.
     """
     try:
         from pygments import highlight as _pyg_highlight
@@ -1166,9 +1259,11 @@ def _pygments_highlight_line(line: str, lang: str) -> str:
         lexer = get_lexer_by_name(lang, stripall=False)
     except Exception:
         lexer = TextLexer()
+
+    style = _get_pygments_style()
     # highlight() adds a trailing newline — strip it.
     return _pyg_highlight(
-        line, lexer, TerminalTrueColorFormatter(style="monokai")
+        line, lexer, TerminalTrueColorFormatter(style=style)
     ).rstrip("\n")
 
 
