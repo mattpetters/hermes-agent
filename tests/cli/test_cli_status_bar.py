@@ -11,6 +11,9 @@ def _make_cli(model: str = "anthropic/claude-sonnet-4-20250514"):
     cli_obj.session_start = datetime.now() - timedelta(minutes=14, seconds=32)
     cli_obj.conversation_history = [{"role": "user", "content": "hi"}]
     cli_obj.agent = None
+    # Attributes normally set by __init__ that status bar methods rely on:
+    cli_obj._status_bar_credits_cache = None
+    cli_obj._status_bar_cost_cache = None
     return cli_obj
 
 
