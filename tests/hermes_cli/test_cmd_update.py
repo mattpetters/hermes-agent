@@ -143,7 +143,7 @@ class TestCmdUpdateBranchFallback:
         ]
         full_flags_install = [
             "/usr/bin/npm",
-            "ci",
+            "install",
             "--silent",
             "--no-fund",
             "--no-audit",
@@ -153,12 +153,12 @@ class TestCmdUpdateBranchFallback:
         # If the working tree is on a fork without a lockfile, fall back to
         # `npm install` would be acceptable too.
         assert npm_calls[0] in [
-            (full_flags, PROJECT_ROOT),
-            (full_flags, PROJECT_ROOT),
+            (full_flags_ci, PROJECT_ROOT),
+            (full_flags_install, PROJECT_ROOT),
         ]
         assert npm_calls[1] in [
-            (full_flags, PROJECT_ROOT / "ui-tui"),
-            (full_flags, PROJECT_ROOT / "ui-tui"),
+            (full_flags_ci, PROJECT_ROOT / "ui-tui"),
+            (full_flags_install, PROJECT_ROOT / "ui-tui"),
         ]
         assert npm_calls[2] in [
             (["/usr/bin/npm", "ci", "--silent"], PROJECT_ROOT / "web"),
