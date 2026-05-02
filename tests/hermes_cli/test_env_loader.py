@@ -82,7 +82,12 @@ def test_main_import_applies_user_env_over_shell_values(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "https://old.example/v1")
     monkeypatch.setenv("HERMES_INFERENCE_PROVIDER", "openrouter")
 
-    sys.modules.pop("hermes_cli.main", None)
+    # Use monkeypatch.delitem so the original module is restored on teardown.
+    # A bare sys.modules.pop leaves sys.modules pointing at the freshly
+    # reimported copy, which breaks subsequent tests that patch hermes_cli.main
+    # attributes (their patches hit the new object, but cmd_* functions carry
+    # a reference to the old one).
+    monkeypatch.delitem(sys.modules, "hermes_cli.main", raising=False)
     importlib.import_module("hermes_cli.main")
 
     assert os.getenv("OPENAI_BASE_URL") == "https://new.example/v1"
