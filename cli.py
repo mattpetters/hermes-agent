@@ -4270,7 +4270,19 @@ class HermesCLI:
     
     def show_banner(self):
         """Display the welcome banner in Claude Code style."""
-        self.console.clear()
+        # Use _output_console() to get the right console for the current
+        # context: during interactive chat (prompt_toolkit active), this
+        # returns ChatConsole which routes Rich ANSI output through _cprint
+        # so escape sequences render correctly.  At startup (no app running),
+        # it returns self.console — the raw Rich Console — which is fine
+        # because patch_stdout isn't active yet.
+        out = self._output_console()
+        # ChatConsole doesn't expose clear(); fall back to self.console
+        # which writes the ANSI clear-screen escape directly to stdout.
+        if hasattr(out, "clear"):
+            out.clear()
+        else:
+            self.console.clear()
 
         # Get context length for display before branching so it remains
         # available to the low-context warning logic in compact mode too.
@@ -4295,7 +4307,7 @@ class HermesCLI:
             
             # Build and display the banner
             build_welcome_banner(
-                console=self.console,
+                console=out,
                 model=self.model,
                 cwd=cwd,
                 tools=tools,
@@ -4308,7 +4320,7 @@ class HermesCLI:
             try:
                 from hermes_cli.banner import build_recent_sessions_panel
                 build_recent_sessions_panel(
-                    console=self.console,
+                    console=out,
                     exclude_session_id=self.session_id,
                     limit=10,
                 )
