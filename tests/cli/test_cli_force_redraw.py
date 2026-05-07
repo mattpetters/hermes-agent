@@ -71,7 +71,7 @@ class TestForceFullRedraw:
             "invalidate",
         ]
 
-    def test_resize_rebuilds_scrollback_before_prompt_toolkit_redraw(self, bare_cli, monkeypatch):
+    def test_resize_recovery_is_non_destructive(self, bare_cli, monkeypatch):
         app = MagicMock()
         out = app.renderer.output
         events = []
@@ -83,20 +83,17 @@ class TestForceFullRedraw:
         app.renderer.reset.side_effect = lambda **_: events.append("renderer_reset")
         monkeypatch.setattr(cli_mod, "_replay_output_history", lambda: events.append("replay"))
         original_on_resize = lambda: events.append("original_resize")
+        app.invalidate.side_effect = lambda: events.append("invalidate")
 
         bare_cli._recover_after_resize(app, original_on_resize)
 
-        assert events == [
-            "reset_attrs",
-            "erase",
-            ("raw", "\x1b[3J"),
-            "home",
-            "flush",
-            "renderer_reset",
-            "replay",
-            "original_resize",
-        ]
-        app.invalidate.assert_not_called()
+        assert events == ["original_resize", "invalidate"]
+        out.reset_attributes.assert_not_called()
+        out.erase_screen.assert_not_called()
+        out.write_raw.assert_not_called()
+        out.cursor_goto.assert_not_called()
+        out.flush.assert_not_called()
+        app.renderer.reset.assert_not_called()
 
     def test_force_redraw_uses_full_screen_clear_without_scrollback_clear(self, bare_cli):
         app = MagicMock()
