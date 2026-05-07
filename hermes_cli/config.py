@@ -1076,10 +1076,12 @@ DEFAULT_CONFIG = {
         "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token
         # External memory provider plugin (empty = built-in only).
-        # Set to a provider name to activate: "openviking", "mem0",
+        # Set to a provider name to activate: "obsidian", "openviking", "mem0",
         # "hindsight", "holographic", "retaindb", "byterover".
         # Only ONE external provider is allowed at a time.
-        "provider": "",
+        # This personal fork defaults to the read-only Obsidian provider; it
+        # auto-discovers ~/vaults/vault-one unless OBSIDIAN_VAULT_PATH is set.
+        "provider": "obsidian",
     },
 
     # Subagent delegation — override the provider:model used by delegate_task
