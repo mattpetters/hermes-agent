@@ -2141,6 +2141,13 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "messaging",
     },
+    "TELEGRAM_CHAT_ONLY_USERS": {
+        "description": "Comma-separated Telegram user IDs that can chat but cannot approve tool calls (get ID from @userinfobot)",
+        "prompt": "Chat-only Telegram user IDs (comma-separated, optional)",
+        "url": "https://t.me/userinfobot",
+        "password": False,
+        "category": "messaging",
+    },
     "TELEGRAM_PROXY": {
         "description": "Proxy URL for Telegram connections (overrides HTTPS_PROXY). Supports http://, https://, socks5://",
         "prompt": "Telegram proxy URL (optional)",

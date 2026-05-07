@@ -320,6 +320,14 @@ class TelegramAdapter(BasePlatformAdapter):
         if not normalized_user_id:
             return False
 
+        # Chat-only users cannot approve/deny tool calls, even if the
+        # gateway authorizes their message traffic.
+        chat_only_csv = os.getenv("TELEGRAM_CHAT_ONLY_USERS", "").strip()
+        if chat_only_csv:
+            chat_only_ids = {uid.strip() for uid in chat_only_csv.split(",") if uid.strip()}
+            if normalized_user_id in chat_only_ids:
+                return False
+
         runner = getattr(getattr(self, "_message_handler", None), "__self__", None)
         auth_fn = getattr(runner, "_is_user_authorized", None)
         if callable(auth_fn):
