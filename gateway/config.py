@@ -962,6 +962,11 @@ def load_gateway_config() -> GatewayConfig:
                     if isinstance(allowed_users, list):
                         allowed_users = ",".join(str(v) for v in allowed_users)
                     os.environ["TELEGRAM_ALLOWED_USERS"] = str(allowed_users)
+                chat_only_users = telegram_cfg.get("chat_only_users")
+                if chat_only_users is not None and not os.getenv("TELEGRAM_CHAT_ONLY_USERS"):
+                    if isinstance(chat_only_users, list):
+                        chat_only_users = ",".join(str(v) for v in chat_only_users)
+                    os.environ["TELEGRAM_CHAT_ONLY_USERS"] = str(chat_only_users)
                 group_allowed_users = telegram_cfg.get("group_allow_from")
                 if group_allowed_users is not None and not os.getenv("TELEGRAM_GROUP_ALLOWED_USERS"):
                     if isinstance(group_allowed_users, list):

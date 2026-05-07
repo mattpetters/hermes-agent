@@ -5547,7 +5547,23 @@ class GatewayRunner:
             if normalized_user_id:
                 check_ids.add(normalized_user_id)
 
-        return bool(check_ids & allowed_ids)
+        if check_ids & allowed_ids:
+            return True
+
+        # Chat-only users: authorized to send messages but cannot
+        # approve tool callbacks (gated in telegram.py).
+        chat_only_env_map = {
+            Platform.TELEGRAM: "TELEGRAM_CHAT_ONLY_USERS",
+        }
+        chat_only_var = chat_only_env_map.get(source.platform)
+        if chat_only_var:
+            chat_only_csv = os.getenv(chat_only_var, "").strip()
+            if chat_only_csv:
+                chat_only_ids = {uid.strip() for uid in chat_only_csv.split(",") if uid.strip()}
+                if "*" in chat_only_ids or bool(check_ids & chat_only_ids):
+                    return True
+
+        return False
 
     def _get_unauthorized_dm_behavior(self, platform: Optional[Platform]) -> str:
         """Return how unauthorized DMs should be handled for a platform.
