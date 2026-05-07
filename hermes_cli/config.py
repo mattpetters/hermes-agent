@@ -2102,6 +2102,29 @@ OPTIONAL_ENV_VARS = {
         "category": "tool",
     },
 
+    # ── Obsidian memory provider ──
+    "OBSIDIAN_VAULT_PATH": {
+        "description": "Path to local Obsidian vault for the read-only Obsidian memory provider",
+        "prompt": "Obsidian vault path (optional, defaults to ~/vaults/vault-one if present)",
+        "password": False,
+        "category": "tool",
+        "advanced": True,
+    },
+    "OBSIDIAN_MEMORY_MAX_CHARS": {
+        "description": "Maximum characters of Obsidian context injected by the memory provider per turn",
+        "prompt": "Obsidian memory context character cap (default 1800)",
+        "password": False,
+        "category": "tool",
+        "advanced": True,
+    },
+    "OBSIDIAN_MEMORY_SEARCH_LIMIT": {
+        "description": "Default number of Obsidian search results for memory prefetch",
+        "prompt": "Obsidian memory search result limit (default 5)",
+        "password": False,
+        "category": "tool",
+        "advanced": True,
+    },
+
     # ── Langfuse observability ──
     "HERMES_LANGFUSE_PUBLIC_KEY": {
         "description": "Langfuse project public key (pk-lf-...)",
