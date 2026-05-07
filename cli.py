@@ -2656,10 +2656,28 @@ class HermesCLI:
             pass
 
     def _recover_after_resize(self, app, original_on_resize) -> None:
-        """Recover a resized classic CLI without desynchronizing cursor state."""
-        self._clear_prompt_toolkit_screen(app, rebuild_scrollback=True)
-        _replay_output_history()
-        original_on_resize()
+        """Recover a resized classic CLI without destroying visible scrollback.
+
+        Older builds handled every resize by clearing the whole screen,
+        jumping the cursor to (0, 0), clearing scrollback, and replaying a
+        small in-process output cache. That fixed some prompt_toolkit footer
+        drift, but it also made real terminal output appear to vanish whenever
+        the emulator, tmux, or cmux emitted a resize/focus redraw. Resize must
+        be non-destructive by default; keep the heavy clear path for explicit
+        Ctrl+L / /redraw only.
+        """
+        try:
+            # Let prompt_toolkit recompute layout/cursor bookkeeping using its
+            # native resize path. Do not erase the terminal or replay lossy
+            # output history here — the emulator's scrollback is the source of
+            # truth for text the user is trying to read.
+            original_on_resize()
+        except Exception:
+            pass
+        try:
+            app.invalidate()
+        except Exception:
+            pass
 
     def _schedule_resize_recovery(self, app, original_on_resize, delay: float = 0.12) -> None:
         """Debounce resize redraws so footer chrome is not stamped into scrollback."""
@@ -12824,20 +12842,12 @@ class HermesCLI:
         _disable_prompt_toolkit_cpr_warning(app)
         self._app = app  # Store reference for clarify_callback
 
-        # ── Fix ghost status-bar lines on terminal resize ──────────────
-        # When the terminal shrinks (e.g. un-maximize), the emulator reflows
-        # the previously-rendered full-width rows (status bar, input rules)
-        # into multiple narrower rows.  prompt_toolkit's _on_resize handler
-        # only cursor_up()s by the stored layout height, missing the extra
-        # rows created by reflow — leaving ghost duplicates visible.
-        #
-        # It's not just column-shrink: widening, row-shrinking, and
-        # multiplexer-driven SIGWINCH-less redraws (cmux / tmux tab switch)
-        # all produce the same class of drift, where the renderer's tracked
-        # _cursor_pos.y no longer matches terminal reality. The only reliable
-        # recovery is a full screen-clear (\x1b[2J\x1b[H) before the next
-        # redraw, so we force one on every resize rather than trying to
-        # compute the exact drift.
+        # ── Debounce terminal resize redraws ───────────────────────────
+        # prompt_toolkit can drift after terminal/tmux/cmux resize events, but
+        # clearing the screen here is destructive: it makes visible output
+        # disappear and moves the prompt to the top of the viewport. Keep
+        # automatic resize recovery non-destructive; explicit Ctrl+L / /redraw
+        # remains available when the user wants a full repaint.
         _original_on_resize = app._on_resize
 
         def _resize_clear_ghosts():
