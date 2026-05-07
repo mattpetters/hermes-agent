@@ -1,0 +1,4 @@
+name: obsidian
+description: Read-only local Obsidian vault recall provider. Searches and reads compact durable context from a vault while excluding agent caches like .claude.
+version: 0.1.0
+type: memory_provider
