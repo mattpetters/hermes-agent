@@ -1126,6 +1126,17 @@ def _launch_tui(
     tui_dev: bool = False,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    toolsets: Optional[str] = None,
+    worktree: bool = False,
+    skills: Optional[list[str]] = None,
+    verbose: bool = False,
+    quiet: bool = False,
+    query: Optional[str] = None,
+    image: Optional[str] = None,
+    checkpoints: bool = False,
+    pass_session_id: bool = False,
+    max_turns: Optional[int] = None,
+    accept_hooks: bool = False,
 ):
     """Replace current process with the TUI."""
     tui_dir = PROJECT_ROOT / "ui-tui"
@@ -1173,6 +1184,33 @@ def _launch_tui(
     if provider:
         env["HERMES_TUI_PROVIDER"] = provider
         env["HERMES_INFERENCE_PROVIDER"] = provider
+    if toolsets:
+        env["HERMES_TUI_TOOLSETS"] = ",".join(
+            part.strip() for part in toolsets.split(",") if part.strip()
+        )
+    if skills:
+        env["HERMES_TUI_SKILLS"] = ",".join(
+            part.strip()
+            for value in skills
+            for part in str(value).split(",")
+            if part.strip()
+        )
+    if verbose:
+        env["HERMES_TUI_TOOL_PROGRESS"] = "verbose"
+    if quiet:
+        env["HERMES_TUI_TOOL_PROGRESS"] = "off"
+    if query:
+        env["HERMES_TUI_QUERY"] = query
+    if image:
+        env["HERMES_TUI_IMAGE"] = image
+    if checkpoints:
+        env["HERMES_TUI_CHECKPOINTS"] = "1"
+    if pass_session_id:
+        env["HERMES_TUI_PASS_SESSION_ID"] = "1"
+    if max_turns is not None:
+        env["HERMES_TUI_MAX_TURNS"] = str(max_turns)
+    if accept_hooks:
+        env["HERMES_ACCEPT_HOOKS"] = "1"
     # Guarantee an 8GB V8 heap + exposed GC for the TUI. Default node cap is
     # ~1.5–4GB depending on version and can fatal-OOM on long sessions with
     # large transcripts / reasoning blobs. Token-level merge: respect any
@@ -1356,6 +1394,17 @@ def cmd_chat(args):
             tui_dev=getattr(args, "tui_dev", False),
             model=getattr(args, "model", None),
             provider=getattr(args, "provider", None),
+            toolsets=getattr(args, "toolsets", None),
+            worktree=getattr(args, "worktree", False),
+            skills=getattr(args, "skills", None),
+            verbose=getattr(args, "verbose", False),
+            quiet=getattr(args, "quiet", False),
+            query=getattr(args, "query", None),
+            image=getattr(args, "image", None),
+            checkpoints=getattr(args, "checkpoints", False),
+            pass_session_id=getattr(args, "pass_session_id", False),
+            max_turns=getattr(args, "max_turns", None),
+            accept_hooks=getattr(args, "accept_hooks", False),
         )
 
     # Import and run the CLI
@@ -8364,6 +8413,12 @@ For more help on a command:
         ),
     )
     parser.add_argument(
+        "-t",
+        "--toolsets",
+        default=None,
+        help="Comma-separated toolsets to enable. Applies to -z/--oneshot and --tui.",
+    )
+    parser.add_argument(
         "--resume",
         "-r",
         metavar="SESSION",
@@ -8460,10 +8515,10 @@ For more help on a command:
         "--image", help="Optional local image path to attach to a single query"
     )
     chat_parser.add_argument(
-        "-m", "--model", help="Model to use (e.g., anthropic/claude-sonnet-4)"
+        "-m", "--model", default=None, help="Model to use (e.g., anthropic/claude-sonnet-4)"
     )
     chat_parser.add_argument(
-        "-t", "--toolsets", help="Comma-separated toolsets to enable"
+        "-t", "--toolsets", default=None, help="Comma-separated toolsets to enable"
     )
     chat_parser.add_argument(
         "-s",
@@ -10961,6 +11016,7 @@ Examples:
             args.oneshot,
             model=getattr(args, "model", None),
             provider=getattr(args, "provider", None),
+            toolsets=getattr(args, "toolsets", None),
         ))
 
     # Handle top-level --resume / --continue as shortcut to chat
