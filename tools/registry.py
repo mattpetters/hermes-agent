@@ -338,33 +338,81 @@ class ToolRegistry:
             entry = entries_by_name.get(name)
             if not entry:
                 continue
-            if entry.check_fn:
-                if entry.check_fn not in check_results:
-                    check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
-                if not check_results[entry.check_fn]:
-                    if not quiet:
-                        logger.debug("Tool %s unavailable (check failed)", name)
-                    continue
-            # Ensure schema always has a "name" field — use entry.name as fallback
-            schema_with_name = {**entry.schema, "name": entry.name}
-            # Apply runtime-dynamic overrides (e.g. delegate_task description
-            # depends on current delegation.max_concurrent_children /
-            # max_spawn_depth). Caller side (model_tools.get_tool_definitions)
-            # already keys its memo on config.yaml mtime + size, so changes
-            # to delegation.* in config invalidate the cache automatically.
-            if entry.dynamic_schema_overrides is not None:
-                try:
-                    overrides = entry.dynamic_schema_overrides()
-                    if isinstance(overrides, dict):
-                        schema_with_name.update(overrides)
-                except Exception as exc:
-                    logger.warning(
-                        "dynamic_schema_overrides for tool %s raised %s; "
-                        "using static schema",
-                        name, exc,
-                    )
-            result.append({"type": "function", "function": schema_with_name})
+            if not self._entry_available(entry, check_results, quiet=quiet):
+                continue
+            result.append({"type": "function", "function": self._schema_for_entry(entry)})
         return result
+
+    def _entry_available(
+        self,
+        entry: ToolEntry,
+        check_results: Dict[Callable, bool] | None = None,
+        *,
+        quiet: bool = True,
+    ) -> bool:
+        """Return True when an entry's availability check passes."""
+        if not entry.check_fn:
+            return True
+        if check_results is None:
+            check_results = {}
+        if entry.check_fn not in check_results:
+            check_results[entry.check_fn] = _check_fn_cached(entry.check_fn)
+        if check_results[entry.check_fn]:
+            return True
+        if not quiet:
+            logger.debug("Tool %s unavailable (check failed)", entry.name)
+        return False
+
+    def _schema_for_entry(self, entry: ToolEntry) -> dict:
+        """Return an OpenAI function schema with name and dynamic overrides."""
+        # Ensure schema always has a "name" field — use entry.name as fallback
+        schema_with_name = {**entry.schema, "name": entry.name}
+        # Apply runtime-dynamic overrides (e.g. delegate_task description
+        # depends on current delegation.max_concurrent_children /
+        # max_spawn_depth). Caller side (model_tools.get_tool_definitions)
+        # already keys its memo on config.yaml mtime + size, so changes
+        # to delegation.* in config invalidate the cache automatically.
+        if entry.dynamic_schema_overrides is not None:
+            try:
+                overrides = entry.dynamic_schema_overrides()
+                if isinstance(overrides, dict):
+                    schema_with_name.update(overrides)
+            except Exception as exc:
+                logger.warning(
+                    "dynamic_schema_overrides for tool %s raised %s; "
+                    "using static schema",
+                    entry.name, exc,
+                )
+        return schema_with_name
+
+    def get_catalog(
+        self,
+        tool_names: Set[str] | None = None,
+        quiet: bool = True,
+    ) -> List[dict]:
+        """Return compact catalog entries for available tools.
+
+        Catalog entries intentionally omit full JSON schemas to keep the system
+        prompt small when progressive tool loading is active.
+        """
+        check_results: Dict[Callable, bool] = {}
+        result: List[dict] = []
+        for entry in sorted(self._snapshot_entries(), key=lambda e: e.name):
+            if tool_names is not None and entry.name not in tool_names:
+                continue
+            if not self._entry_available(entry, check_results, quiet=quiet):
+                continue
+            result.append({
+                "name": entry.name,
+                "description": entry.description or entry.schema.get("description", ""),
+                "toolset": entry.toolset,
+            })
+        return result
+
+    def get_single_definition(self, tool_name: str) -> Optional[dict]:
+        """Return one available OpenAI-format tool schema, or None."""
+        results = self.get_definitions({tool_name}, quiet=True)
+        return results[0] if results else None
 
     # ------------------------------------------------------------------
     # Dispatch

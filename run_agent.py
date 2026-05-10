@@ -135,6 +135,7 @@ from tools.terminal_tool import (
 from tools.tool_result_storage import maybe_persist_tool_result, enforce_turn_budget
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
+from tools.registry import registry as _tool_registry
 
 
 # Agent internals extracted to agent/ package for modularity
@@ -2323,6 +2324,40 @@ class AIAgent:
                 api_mode=self.api_mode,
             )
         self.compression_enabled = compression_enabled
+
+        self._tool_search_active = False
+        self._loaded_tools: dict[str, int] = {}
+        self._pinned_tool_names: set[str] = set()
+        self._tool_evict_after: int = 10
+        ts_config = _agent_cfg.get("tool_search", {}) if isinstance(_agent_cfg, dict) else {}
+        if not isinstance(ts_config, dict):
+            ts_config = {}
+        defer_mode = str(ts_config.get("mode", "auto"))
+        if defer_mode != "never" and self.tools:
+            from model_tools import _estimate_tool_tokens, should_defer_tools
+
+            tool_tokens = _estimate_tool_tokens(self.tools)
+            context_length = getattr(self.context_compressor, "context_length", 0)
+            try:
+                threshold = float(ts_config.get("threshold", 0.10))
+            except (TypeError, ValueError):
+                threshold = 0.10
+            if should_defer_tools(tool_tokens, context_length, mode=defer_mode, threshold=threshold):
+                pinned = list(ts_config.get("pinned_tools") or [])
+                self.tools = get_tool_definitions(
+                    enabled_toolsets=enabled_toolsets,
+                    disabled_toolsets=disabled_toolsets,
+                    quiet_mode=self.quiet_mode,
+                    deferred=True,
+                    pinned_tools=pinned,
+                )
+                self.valid_tool_names = {tool["function"]["name"] for tool in self.tools}
+                self._tool_search_active = True
+                self._pinned_tool_names = set(pinned) | {"tool_search", "tool_details"}
+                try:
+                    self._tool_evict_after = int(ts_config.get("evict_after_turns", 10))
+                except (TypeError, ValueError):
+                    self._tool_evict_after = 10
 
         # Reject models whose context window is below the minimum required
         # for reliable tool-calling workflows (64K tokens).
@@ -5958,6 +5993,16 @@ class AIAgent:
         # API-call time only so it stays out of the cached/stored system prompt.
         if system_message is not None:
             context_parts.append(system_message)
+
+        if getattr(self, "_tool_search_active", False):
+            try:
+                from model_tools import get_deferred_catalog
+                from agent.prompt_builder import build_tool_catalog_prompt
+                tool_catalog_prompt = build_tool_catalog_prompt(get_deferred_catalog())
+                if tool_catalog_prompt:
+                    prompt_parts.append(tool_catalog_prompt)
+            except Exception:
+                logger.debug("Tool catalog prompt build failed", exc_info=True)
 
         if not self.skip_context_files:
             # Use TERMINAL_CWD for context file discovery when set (gateway
@@ -10252,6 +10297,7 @@ class AIAgent:
             f"{approx_tokens:,}" if approx_tokens else "unknown", self.model,
             focus_topic,
         )
+        self._evict_stale_tools()
 
         # Notify external memory provider before compression discards context
         if self._memory_manager:
@@ -10449,6 +10495,71 @@ class AIAgent:
     def _guardrail_block_result(self, decision: ToolGuardrailDecision) -> str:
         self._set_tool_guardrail_halt(decision)
         return toolguard_synthetic_result(decision)
+
+    def _ingest_tool_search_result(self, function_name: str, raw_result: str) -> list[str]:
+        """Load schemas returned by tool_search/tool_details into active tools."""
+        if not getattr(self, "_tool_search_active", False):
+            return []
+        if function_name not in {"tool_search", "tool_details"}:
+            if function_name in self._loaded_tools:
+                self._loaded_tools[function_name] = self._api_call_count
+            return []
+        try:
+            data = json.loads(raw_result)
+        except (TypeError, json.JSONDecodeError):
+            return []
+        loaded: list[str] = []
+        for schema in data.get("tools", []) if isinstance(data, dict) else []:
+            if not isinstance(schema, dict):
+                continue
+            tool_name = schema.get("function", {}).get("name")
+            if not tool_name or tool_name in self.valid_tool_names:
+                continue
+            self.tools.append(schema)
+            self.valid_tool_names.add(tool_name)
+            self._loaded_tools[tool_name] = self._api_call_count
+            loaded.append(tool_name)
+            logger.info("Dynamically loaded tool: %s", tool_name)
+        return loaded
+
+    def _auto_load_deferred_tool_call(self, tool_call) -> bool:
+        """Load a deferred tool when the model directly calls its catalog name."""
+        if not getattr(self, "_tool_search_active", False):
+            return False
+        fname = getattr(getattr(tool_call, "function", None), "name", "")
+        if not fname or fname in self.valid_tool_names:
+            return False
+        schema = _tool_registry.get_single_definition(fname)
+        if not schema:
+            return False
+        self.tools.append(schema)
+        self.valid_tool_names.add(fname)
+        self._loaded_tools[fname] = self._api_call_count
+        logger.info("Auto-loaded deferred tool on direct call: %s", fname)
+        try:
+            self._vprint(f"{self.log_prefix}🔍 Auto-loaded deferred tool '{fname}'")
+        except Exception:
+            pass
+        return True
+
+    def _evict_stale_tools(self) -> list[str]:
+        """Evict dynamically loaded tools unused for the configured turn window."""
+        if not getattr(self, "_tool_search_active", False) or not self._loaded_tools:
+            return []
+        cutoff = self._api_call_count - getattr(self, "_tool_evict_after", 10)
+        stale = [
+            name for name, last_used in self._loaded_tools.items()
+            if last_used < cutoff and name not in self._pinned_tool_names
+        ]
+        if not stale:
+            return []
+        stale_set = set(stale)
+        self.tools = [tool for tool in self.tools if tool.get("function", {}).get("name") not in stale_set]
+        self.valid_tool_names.difference_update(stale_set)
+        for name in stale:
+            self._loaded_tools.pop(name, None)
+        logger.info("Tool eviction: removed %d stale tool(s): %s", len(stale), ", ".join(stale))
+        return stale
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls from the assistant message and append results to messages.
@@ -10961,6 +11072,7 @@ class AIAgent:
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
 
+            raw_function_result = function_result
             function_result = maybe_persist_tool_result(
                 content=function_result,
                 tool_name=name,
@@ -10997,6 +11109,8 @@ class AIAgent:
                 "tool_call_id": tc.id,
             }
             messages.append(tool_msg)
+            if not _is_multimodal_tool_result(raw_function_result):
+                self._ingest_tool_search_result(name, raw_function_result)
 
             # ── Per-tool /steer drain ───────────────────────────────────
             # Same as the sequential path: drain between each collected
@@ -11387,6 +11501,7 @@ class AIAgent:
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
 
+            raw_function_result = function_result
             function_result = maybe_persist_tool_result(
                 content=function_result,
                 tool_name=function_name,
@@ -11416,6 +11531,8 @@ class AIAgent:
                 "tool_call_id": tool_call.id
             }
             messages.append(tool_msg)
+            if not _is_multimodal_tool_result(raw_function_result):
+                self._ingest_tool_search_result(function_name, raw_function_result)
 
             # ── Per-tool /steer drain ───────────────────────────────────
             # Drain pending steer BETWEEN individual tool calls so the
@@ -14560,6 +14677,8 @@ class AIAgent:
                             if repaired:
                                 print(f"{self.log_prefix}🔧 Auto-repaired tool name: '{tc.function.name}' -> '{repaired}'")
                                 tc.function.name = repaired
+                            else:
+                                self._auto_load_deferred_tool_call(tc)
                     invalid_tool_calls = [
                         tc.function.name for tc in assistant_message.tool_calls
                         if tc.function.name not in self.valid_tool_names

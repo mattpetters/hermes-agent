@@ -368,6 +368,28 @@ compression:
   # auxiliary section below (auxiliary.compression.provider / model).
 
 # =============================================================================
+# Tool Search (Progressive Tool Loading)
+# =============================================================================
+# When tool definitions take too much context, Hermes can expose only
+# tool_search/tool_details plus a compact catalog, then load full schemas on
+# demand. This is especially useful for OpenAI-compatible GPT-5.4+ routes that
+# reject requests with more than 128 tools.
+tool_search:
+  # "auto" activates when estimated tool-schema tokens exceed threshold × the
+  # model context length. "always" forces progressive loading; "never" disables it.
+  mode: auto
+
+  # Auto-activation threshold. 0.10 means defer when schemas exceed 10% of context.
+  threshold: 0.10
+
+  # Full schemas to keep loaded from turn 1. Useful for tiny always-needed tools.
+  pinned_tools: []
+
+  # Dynamically loaded tools are evicted on context compression when unused for
+  # this many API turns. They remain searchable/reloadable from the catalog.
+  evict_after_turns: 10
+
+# =============================================================================
 # Anthropic prompt caching TTL
 # =============================================================================
 # When prompt caching is active (Claude via OpenRouter or native Anthropic),

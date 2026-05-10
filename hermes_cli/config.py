@@ -521,6 +521,16 @@ DEFAULT_CONFIG = {
         "image_input_mode": "auto",
         "disabled_toolsets": [],
     },
+    "tool_search": {
+        # Progressive tool loading.  "auto" replaces large full-schema tool
+        # surfaces with tool_search/tool_details plus a compact catalog when
+        # schemas exceed threshold × context_length.  "always" forces this;
+        # "never" disables it.
+        "mode": "auto",
+        "threshold": 0.10,
+        "pinned_tools": [],
+        "evict_after_turns": 10,
+    },
     
     "terminal": {
         "backend": "local",

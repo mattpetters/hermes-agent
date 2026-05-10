@@ -260,6 +260,45 @@ _LEGACY_TOOLSET_MAP = {
 # daemon start/stop, env var changes, etc.) on a 30 s horizon.
 _tool_defs_cache: Dict[tuple, List[Dict[str, Any]]] = {}
 
+_deferred_catalog: List[Dict[str, Any]] = []
+_all_session_tool_names: List[str] = []
+
+
+def _estimate_tool_tokens(definitions: List[Dict[str, Any]]) -> int:
+    """Rough token estimate for tool definitions (~4 chars/token)."""
+    return sum(len(json.dumps(definition, sort_keys=True)) // 4 for definition in definitions)
+
+
+def should_defer_tools(
+    tool_token_estimate: int,
+    context_length: int,
+    mode: str = "auto",
+    threshold: float = 0.10,
+) -> bool:
+    """Return True when tool schemas should be loaded progressively."""
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    if context_length <= 0:
+        return False
+    return (tool_token_estimate / context_length) > threshold
+
+
+def get_deferred_catalog() -> List[Dict[str, Any]]:
+    """Return the compact catalog captured during deferred tool setup."""
+    return list(_deferred_catalog)
+
+
+def get_all_session_tool_names() -> List[str]:
+    """Return full session tool names before deferral."""
+    return list(_all_session_tool_names)
+
+
+def get_last_resolved_tool_names() -> List[str]:
+    """Return tool names exposed to the model by the latest resolution."""
+    return list(_last_resolved_tool_names)
+
 
 def _clear_tool_defs_cache() -> None:
     """Drop memoized get_tool_definitions() results. Called when dynamic
@@ -272,6 +311,8 @@ def get_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
+    deferred: bool = False,
+    pinned_tools: List[str] | None = None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -294,7 +335,7 @@ def get_tool_definitions(
     # user-visible config edits that affect dynamic schemas (execute_code
     # mode, discord action allowlist, etc.) without needing an explicit
     # invalidate hook on every config-writer.
-    if quiet_mode:
+    if quiet_mode and not deferred:
         try:
             from hermes_cli.config import get_config_path
             cfg_path = get_config_path()
@@ -318,8 +359,14 @@ def get_tool_definitions(
             # schemas are treated as read-only by all known callers.
             return list(cached)
 
-    result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode)
-    if quiet_mode:
+    result = _compute_tool_definitions(
+        enabled_toolsets,
+        disabled_toolsets,
+        quiet_mode,
+        deferred=deferred,
+        pinned_tools=pinned_tools,
+    )
+    if quiet_mode and not deferred:
         # Cache the freshly-computed list, but hand callers a shallow copy so
         # downstream mutations (e.g. run_agent appending memory/LCM tool
         # schemas to self.tools) don't poison the cache. Without this, a
@@ -336,6 +383,8 @@ def _compute_tool_definitions(
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
     quiet_mode: bool = False,
+    deferred: bool = False,
+    pinned_tools: List[str] | None = None,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
@@ -388,6 +437,9 @@ def _compute_tool_definitions(
 
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
+
+    global _all_session_tool_names
+    _all_session_tool_names = [t["function"]["name"] for t in filtered_tools]
 
     # The set of tool names that actually passed check_fn filtering.
     # Use this (not tools_to_include) for any downstream schema that references
@@ -457,7 +509,17 @@ def _compute_tool_definitions(
                     }
                     break
 
-    if not quiet_mode:
+    if deferred:
+        from tools.tool_search import register_tool_search
+
+        register_tool_search(registry=registry)
+        global _deferred_catalog
+        _deferred_catalog = registry.get_catalog(tools_to_include)
+        pinned = set(pinned_tools or [])
+        pinned_defs = [tool for tool in filtered_tools if tool["function"]["name"] in pinned]
+        meta_defs = registry.get_definitions({"tool_details", "tool_search"}, quiet=True)
+        filtered_tools = meta_defs + pinned_defs
+    elif not quiet_mode:
         if filtered_tools:
             tool_names = [t["function"]["name"] for t in filtered_tools]
             print(f"🛠️  Final tool selection ({len(filtered_tools)} tools): {', '.join(tool_names)}")
@@ -772,9 +834,10 @@ def handle_function_call(
         # unaffected by wall-clock adjustments during the call.
         _dispatch_start = time.monotonic()
         if function_name == "execute_code":
-            # Prefer the caller-provided list so subagents can't overwrite
-            # the parent's tool set via the process-global.
-            sandbox_enabled = enabled_tools if enabled_tools is not None else _last_resolved_tool_names
+            # Use the full session tool set when tool_search deferred schemas
+            # from the model's view; otherwise prefer the caller-provided list
+            # so subagents can't overwrite the parent's tool set via globals.
+            sandbox_enabled = _all_session_tool_names or enabled_tools or _last_resolved_tool_names
             result = registry.dispatch(
                 function_name, function_args,
                 task_id=task_id,

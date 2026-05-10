@@ -70,6 +70,37 @@ _CORE_TOOL_NAMES: Set[str] = {
 }
 
 
+def _truncate_tools_to_provider_limit(
+    tools: list[dict[str, Any]],
+    *,
+    label: str = "Chat Completions",
+) -> list[dict[str, Any]]:
+    """Apply the OpenAI-compatible 128-tool cap with stable core-tool priority."""
+    if len(tools) <= _RESPONSES_API_MAX_TOOLS:
+        return tools
+
+    def _tool_priority(t: Dict[str, Any]) -> int:
+        fn = t.get("function", {}) if isinstance(t, dict) else {}
+        name = str(fn.get("name", "")).strip().lower()
+        return 0 if name in _CORE_TOOL_NAMES else 1
+
+    sorted_tools = sorted(tools, key=_tool_priority)
+    dropped = [
+        str(t.get("function", {}).get("name", "?")) if isinstance(t, dict) else "?"
+        for t in sorted_tools[_RESPONSES_API_MAX_TOOLS:]
+    ]
+    logger.warning(
+        "%s tool limit exceeded: %d tools discovered, truncating to %d.  "
+        "Dropped tools: %s.  Consider enabling tool_search or disabling unused "
+        "toolsets in config.yaml (agent.disabled_toolsets).",
+        label,
+        len(tools),
+        _RESPONSES_API_MAX_TOOLS,
+        ", ".join(dropped[:20]) + (" ..." if len(dropped) > 20 else ""),
+    )
+    return sorted_tools[:_RESPONSES_API_MAX_TOOLS]
+
+
 def _build_gemini_thinking_config(model: str, reasoning_config: dict | None) -> dict | None:
     """Translate Hermes/OpenRouter-style reasoning config to Gemini thinkingConfig."""
     if reasoning_config is None or not isinstance(reasoning_config, dict):
@@ -305,27 +336,7 @@ class ChatCompletionsTransport(ProviderTransport):
             # array for both Chat Completions and Responses API.  Truncate
             # with priority ordering (core tools first) so the most-likely-to-be-used
             # functions are preserved.
-            if len(tools) > _RESPONSES_API_MAX_TOOLS:
-                def _tool_priority(t: Dict[str, Any]) -> int:
-                    fn = t.get("function", {}) if isinstance(t, dict) else {}
-                    name = str(fn.get("name", "")).strip().lower()
-                    return 0 if name in _CORE_TOOL_NAMES else 1
-
-                sorted_tools = sorted(tools, key=_tool_priority)
-                dropped = [
-                    str(t.get("function", {}).get("name", "?")) if isinstance(t, dict) else "?"
-                    for t in sorted_tools[_RESPONSES_API_MAX_TOOLS:]
-                ]
-                logger.warning(
-                    "Chat Completions tool limit exceeded: %d tools discovered, "
-                    "truncating to %d.  Dropped tools: %s.  "
-                    "Consider disabling unused toolsets in config.yaml (agent.disabled_toolsets) "
-                    "or using enabled_toolsets for this model.",
-                    len(tools),
-                    _RESPONSES_API_MAX_TOOLS,
-                    ", ".join(dropped[:20]) + (" ..." if len(dropped) > 20 else ""),
-                )
-                tools = sorted_tools[:_RESPONSES_API_MAX_TOOLS]
+            tools = _truncate_tools_to_provider_limit(tools, label="Chat Completions")
 
             api_kwargs["tools"] = tools
 
@@ -515,7 +526,10 @@ class ChatCompletionsTransport(ProviderTransport):
         if tools:
             if is_moonshot_model(model):
                 tools = sanitize_moonshot_tools(tools)
-            api_kwargs["tools"] = tools
+            api_kwargs["tools"] = _truncate_tools_to_provider_limit(
+                tools,
+                label=f"{profile.name} Chat Completions",
+            )
 
         # max_tokens resolution — priority: ephemeral > user > profile default
         max_tokens_fn = params.get("max_tokens_param_fn")

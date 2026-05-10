@@ -52,6 +52,33 @@ Common toolsets include `web`, `search`, `terminal`, `file`, `browser`, `vision`
 
 See [Toolsets Reference](/docs/reference/toolsets-reference) for the full set, including platform presets such as `hermes-cli`, `hermes-telegram`, and dynamic MCP toolsets like `mcp-<server>`.
 
+## Progressive Tool Loading
+
+Hermes can automatically switch large tool surfaces to **progressive tool loading**. This is mostly invisible from the user's point of view: you still ask for the same work, and the agent still uses tools normally. Internally, when the full tool schema list would consume too much context, Hermes initially sends only:
+
+- a compact catalog of available tool names and descriptions,
+- `tool_search(query, limit)` to find matching tools, and
+- `tool_details(name)` to load one exact tool schema.
+
+After the model searches or requests details, Hermes adds the returned schemas to the active tool set and the model can call those tools. Frequently used tools can also be pinned so their full schemas are available from the first turn.
+
+This avoids provider hard limits such as OpenAI-compatible GPT-5.4+ routes rejecting requests with more than 128 tools. If progressive loading is disabled or a request still exceeds the provider cap, Hermes applies a deterministic safety truncation that keeps core tools first and logs the dropped tool names.
+
+Configuration in `~/.hermes/config.yaml`:
+
+```yaml
+tool_search:
+  # auto = enable only when tool schemas exceed threshold × context length
+  # always = force progressive loading
+  # never = send full tool schemas normally
+  mode: auto
+  threshold: 0.10
+  pinned_tools: []
+  evict_after_turns: 10
+```
+
+Most users should leave this on `auto`. Set `mode: always` when using very large MCP/plugin tool catalogs or provider routes with strict tool-count caps. Set `mode: never` only for debugging or if a backend has trouble with the meta-tools.
+
 ## Terminal Backends
 
 The terminal tool can execute commands in different environments:
