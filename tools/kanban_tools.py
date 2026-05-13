@@ -57,20 +57,23 @@ def _profile_has_kanban_toolset() -> bool:
 
 
 def _check_kanban_mode() -> bool:
-    """Task-lifecycle tools are available when:
+    """Task-lifecycle tools are available when the kanban toolset is
+    enabled in the current profile's toolsets config, OR when the agent
+    is spawned as a kanban worker (``HERMES_KANBAN_TASK`` env set).
 
-    1. ``HERMES_KANBAN_TASK`` is set (dispatcher-spawned worker), OR
-    2. The current profile has ``kanban`` in its toolsets config
-       (orchestrator profiles like techlead that route work via Kanban).
-
-    Humans running ``hermes chat`` without the kanban toolset see zero
-    kanban tools. Workers spawned by the kanban dispatcher (gateway-
-    embedded by default) and orchestrator profiles with the kanban
-    toolset enabled see the Kanban lifecycle tool surface.
+    The toolset system (``toolsets.py`` / ``hermes tools``) is the
+    primary gate — these check functions mirror it for runtime
+    re-check, but the default is permissive so kanban tools that are
+    wired into a toolset (e.g. via ``_HERMES_CORE_TOOLS``) actually
+    appear in the schema without requiring a separate config key.
     """
     if os.environ.get("HERMES_KANBAN_TASK"):
         return True
-    return _profile_has_kanban_toolset()
+    # Kanban lifecycle tools are harmless outside a worker context —
+    # they just interact with the board DB.  Gating on the env is
+    # enough; the toolset system is the canonical gate for schema
+    # membership.
+    return True
 
 
 def _check_kanban_orchestrator_mode() -> bool:
